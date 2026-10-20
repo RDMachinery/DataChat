@@ -92,6 +92,9 @@ public class DataChat extends JFrame {
     private final List<String[]> turns = new ArrayList<>();      // {question, planJson}
     private final StringBuilder chatHtml = new StringBuilder();
     private File lastDir;
+    private final List<DataTable> library = new ArrayList<>();   // every table loaded this session, for joins
+    private final JButton joinBtn = new JButton("Join tables...");
+    private final JButton cleanBtn = new JButton("Clean data...");
 
     private final JEditorPane chat = new JEditorPane("text/html", "");
     private final JTextField input = new JTextField();
@@ -113,8 +116,8 @@ public class DataChat extends JFrame {
     private final JButton pdfBtn = new JButton("Export PDF report...");
     private final JButton chartBtn = new JButton("Save chart as PNG...");
     private final JCheckBox darkBox = new JCheckBox("Dark mode");
-    private static final ChartType[] SWITCH_TYPES = {ChartType.BAR, ChartType.HBAR, ChartType.LINE, ChartType.PIE};
-    private static final String[] SWITCH_NAMES = {"Bars", "Horizontal bars", "Line", "Pie"};
+    private static final ChartType[] SWITCH_TYPES = {ChartType.BAR, ChartType.HBAR, ChartType.LINE, ChartType.PIE, ChartType.STACK, ChartType.STACK100};
+    private static final String[] SWITCH_NAMES = {"Bars", "Horizontal bars", "Line", "Pie", "Stacked", "100% stacked"};
     private final JToggleButton[] typeBtns = new JToggleButton[SWITCH_TYPES.length];
     private final ButtonGroup typeGroup = new ButtonGroup();
     private boolean dark;
@@ -151,6 +154,12 @@ public class DataChat extends JFrame {
         JPanel row1 = new JPanel(new FlowLayout(FlowLayout.LEFT, 8, 4));
         row1.add(load);
         row1.add(demo);
+        joinBtn.setToolTipText("Combine two files or Excel sheets on a shared key column (for example orders + customers).");
+        joinBtn.addActionListener(e -> joinDialog());
+        row1.add(joinBtn);
+        cleanBtn.setToolTipText("Fix column types, rename or remove columns, treat N/A as empty, remove duplicate rows, or add a calculated column.");
+        cleanBtn.addActionListener(e -> cleanDialog());
+        row1.add(cleanBtn);
         row1.add(Box.createHorizontalStrut(14));
         row1.add(pdfBtn);
         row1.add(Box.createHorizontalStrut(14));
@@ -422,10 +431,7 @@ public class DataChat extends JFrame {
         setBusy(true, "Loading " + f.getName() + "...");
         new SwingWorker<DataTable, Void>() {
             protected DataTable doInBackground() throws Exception {
-                byte[] b = Files.readAllBytes(f.toPath());
-                String s = new String(b, StandardCharsets.UTF_8);
-                if (s.indexOf('\uFFFD') >= 0) s = new String(b, Charset.forName("windows-1252"));
-                return DataTable.fromCsv(f.getName(), s);
+                return readCsvFile(f);
             }
 
             protected void done() {
@@ -510,6 +516,7 @@ public class DataChat extends JFrame {
 
     private void setTable(DataTable t, boolean demo) {
         table = t;
+        remember(t);
         demoLoaded = demo;
         turns.clear();
         chatHtml.setLength(0);
@@ -544,6 +551,629 @@ public class DataChat extends JFrame {
         updateStatus();
         findInsights(t);
     }
+
+    // ---------------------------------------------------------------- joins (UI)
+    private static String tableLabel(DataTable t) {
+        return t.name + "  (" + String.format(Locale.US, "%,d", t.rows) + " rows, " + t.cols.size() + " columns)";
+    }
+
+    private void remember(DataTable t) {
+        library.removeIf(o -> o != t && o.name.equals(t.name));
+        if (!library.contains(t)) library.add(t);
+        while (library.size() > 10) library.remove(library.get(0) == table && library.size() > 1 ? 1 : 0);
+    }
+
+    /** Ask for a file (and sheets for a workbook), read the tables, remember them, and report them to {@code done}. */
+    private void addTablesFromFile(Component parent, java.util.function.Consumer<List<DataTable>> done) {
+        JFileChooser fc = new JFileChooser(lastDir);
+        fc.setFileFilter(new FileNameExtensionFilter("CSV, TSV, text and Excel files", "csv", "tsv", "txt", "xlsx", "xlsm"));
+        if (fc.showOpenDialog(parent) != JFileChooser.APPROVE_OPTION) return;
+        File f = fc.getSelectedFile();
+        lastDir = f.getParentFile();
+        String lname = f.getName().toLowerCase(Locale.ROOT);
+        if (lname.endsWith(".xls")) {
+            JOptionPane.showMessageDialog(parent, f.getName() + " is an old-style Excel (.xls) file, which I can't read.\nSave it as .xlsx or CSV in Excel and add that.", "Can't read file", JOptionPane.WARNING_MESSAGE);
+            return;
+        }
+        Cursor old = parent.getCursor();
+        parent.setCursor(Cursor.getPredefinedCursor(Cursor.WAIT_CURSOR));
+        if (!Xlsx.isExcel(f)) {
+            new SwingWorker<DataTable, Void>() {
+                protected DataTable doInBackground() throws Exception { return readCsvFile(f); }
+
+                protected void done() {
+                    parent.setCursor(old);
+                    try {
+                        DataTable t = get();
+                        remember(t);
+                        done.accept(List.of(t));
+                    } catch (Exception ex) {
+                        Throwable c = ex.getCause() != null ? ex.getCause() : ex;
+                        JOptionPane.showMessageDialog(parent, "I couldn't read that file: " + c.getMessage(), "Can't read file", JOptionPane.WARNING_MESSAGE);
+                    }
+                }
+            }.execute();
+            return;
+        }
+        new SwingWorker<List<Xlsx.SheetRef>, Void>() {
+            protected List<Xlsx.SheetRef> doInBackground() throws Exception { return Xlsx.sheets(f); }
+
+            protected void done() {
+                parent.setCursor(old);
+                List<Xlsx.SheetRef> all;
+                try {
+                    all = get();
+                } catch (Exception ex) {
+                    Throwable c = ex.getCause() != null ? ex.getCause() : ex;
+                    JOptionPane.showMessageDialog(parent, "I couldn't read that workbook: " + c.getMessage(), "Can't read file", JOptionPane.WARNING_MESSAGE);
+                    return;
+                }
+                List<Xlsx.SheetRef> visible = new ArrayList<>();
+                for (Xlsx.SheetRef s : all) if (!s.hidden()) visible.add(s);
+                if (visible.isEmpty()) visible = all;
+                List<Xlsx.SheetRef> pick = visible;
+                if (visible.size() > 1) {
+                    JList<String> list = new JList<>(visible.stream().map(Xlsx.SheetRef::name).toArray(String[]::new));
+                    list.setSelectionInterval(0, 0);
+                    int ok = JOptionPane.showConfirmDialog(parent, new Object[]{"\"" + f.getName() + "\" has " + visible.size() + " sheets. Select the ones to add (Ctrl-click for several):", new JScrollPane(list)},
+                            "Choose sheets", JOptionPane.OK_CANCEL_OPTION, JOptionPane.QUESTION_MESSAGE);
+                    if (ok != JOptionPane.OK_OPTION || list.getSelectedIndices().length == 0) return;
+                    pick = new ArrayList<>();
+                    for (int i : list.getSelectedIndices()) pick.add(visible.get(i));
+                }
+                final List<Xlsx.SheetRef> chosen = pick;
+                final boolean multi = visible.size() > 1;
+                parent.setCursor(Cursor.getPredefinedCursor(Cursor.WAIT_CURSOR));
+                new SwingWorker<List<DataTable>, Void>() {
+                    protected List<DataTable> doInBackground() throws Exception {
+                        List<DataTable> out = new ArrayList<>();
+                        for (Xlsx.SheetRef sh : chosen) {
+                            Xlsx.Loaded l = Xlsx.read(f, sh);
+                            out.add(DataTable.fromRecords(f.getName() + (multi ? " [" + sh.name() + "]" : ""), l.records()));
+                        }
+                        return out;
+                    }
+
+                    protected void done() {
+                        parent.setCursor(old);
+                        try {
+                            List<DataTable> ts = get();
+                            for (DataTable t : ts) remember(t);
+                            done.accept(ts);
+                        } catch (Exception ex) {
+                            Throwable c = ex.getCause() != null ? ex.getCause() : ex;
+                            JOptionPane.showMessageDialog(parent, "I couldn't read that sheet: " + c.getMessage(), "Can't read file", JOptionPane.WARNING_MESSAGE);
+                        }
+                    }
+                }.execute();
+            }
+        }.execute();
+    }
+
+    private int joinSeq;
+
+    private void joinDialog() {
+        JDialog dlg = new JDialog(this, "Join two tables", true);
+        DefaultComboBoxModel<DataTable> lm = new DefaultComboBoxModel<>(), rm = new DefaultComboBoxModel<>();
+        JComboBox<DataTable> leftBox = new JComboBox<>(lm), rightBox = new JComboBox<>(rm);
+        ListCellRenderer<Object> rend = new DefaultListCellRenderer() {
+            public Component getListCellRendererComponent(JList<?> l, Object v, int i, boolean s, boolean f) {
+                return super.getListCellRendererComponent(l, v instanceof DataTable t ? tableLabel(t) : v, i, s, f);
+            }
+        };
+        leftBox.setRenderer(rend);
+        rightBox.setRenderer(rend);
+        final int KEYS = 3;
+        JComboBox<String>[] lk = new JComboBox[KEYS], rk = new JComboBox[KEYS];
+        for (int i = 0; i < KEYS; i++) {
+            lk[i] = new JComboBox<>();
+            rk[i] = new JComboBox<>();
+        }
+        JRadioButton leftKind = new JRadioButton("Keep every row of the left table (recommended)", true);
+        JRadioButton innerKind = new JRadioButton("Keep only rows that match in both tables");
+        JRadioButton fullKind = new JRadioButton("Keep all rows from both tables");
+        ButtonGroup kg = new ButtonGroup();
+        kg.add(leftKind);
+        kg.add(innerKind);
+        kg.add(fullKind);
+        JTextArea check = new JTextArea(7, 60);
+        check.setEditable(false);
+        check.setLineWrap(true);
+        check.setWrapStyleWord(true);
+        check.setOpaque(false);
+        check.setFont(UIManager.getFont("Label.font"));
+        JButton ok = new JButton("Join"), cancel = new JButton("Cancel"), add = new JButton("Add file or sheet...");
+        ok.setEnabled(false);
+
+        for (DataTable t : library) {
+            lm.addElement(t);
+            rm.addElement(t);
+        }
+        if (table != null) leftBox.setSelectedItem(table);
+        if (library.size() > 1) {
+            for (DataTable t : library) if (t != leftBox.getSelectedItem()) {
+                rightBox.setSelectedItem(t);
+                // prefer the most recently added other table
+            }
+        }
+
+        Runnable recheck = () -> {
+            DataTable L = (DataTable) leftBox.getSelectedItem(), R = (DataTable) rightBox.getSelectedItem();
+            List<Join.Key> keys = joinKeys(L, R, lk, rk);
+            ok.setEnabled(false);
+            if (L == null || R == null) {
+                check.setText("Add two tables to join. Use \"Add file or sheet...\" to load another CSV or Excel sheet.");
+                return;
+            }
+            if (L == R) {
+                check.setText("Choose two different tables.");
+                return;
+            }
+            if (keys.isEmpty()) {
+                check.setText("Choose the key column in each table: the column whose values identify the same thing in both (a customer ID, a product code, a date).");
+                return;
+            }
+            final int seq = ++joinSeq;
+            check.setText("Checking how well the keys match...");
+            new SwingWorker<Join.Stats, Void>() {
+                protected Join.Stats doInBackground() { return Join.check(L, R, keys); }
+
+                protected void done() {
+                    if (seq != joinSeq) return;
+                    try {
+                        Join.Stats s = get();
+                        StringBuilder sb = new StringBuilder();
+                        sb.append(Join.pct(s.leftMatched, s.leftRows)).append(" of ").append(L.name).append(" rows (").append(Join.num(s.leftMatched)).append(" of ").append(Join.num(s.leftRows)).append(") find a match in ").append(R.name).append(".\n");
+                        sb.append(Join.pct(s.rightMatched, s.rightRows)).append(" of ").append(R.name).append(" rows find a match in ").append(L.name).append(".\n");
+                        if (s.leftBlank + s.rightBlank > 0) sb.append("Blank keys (can't match): ").append(Join.num(s.leftBlank)).append(" in ").append(L.name).append(", ").append(Join.num(s.rightBlank)).append(" in ").append(R.name).append(".\n");
+                        if (s.leftFanOut > 0) sb.append("WARNING: ").append(Join.num(s.leftFanOut)).append(" rows of ").append(L.name).append(" match several rows of ").append(R.name)
+                                .append(", so they would be repeated and totals of ").append(L.name).append("'s numbers would be inflated. Try a different or additional key.\n");
+                        else if (s.leftMatched > 0) sb.append("Each matching row finds exactly one partner, so no rows are repeated.\n");
+                        if (s.leftMatched == 0) {
+                            sb.append("Nothing matches. ");
+                            if (!s.leftSamples.isEmpty()) sb.append(L.name).append(" has e.g. ").append(String.join(", ", s.leftSamples)).append("; ");
+                            if (!s.rightSamples.isEmpty()) sb.append(R.name).append(" has e.g. ").append(String.join(", ", s.rightSamples)).append(".");
+                        } else if (s.leftUnmatched() > 0 && !s.leftSamples.isEmpty())
+                            sb.append("Not found in ").append(R.name).append(", e.g.: ").append(String.join(", ", s.leftSamples)).append(".\n");
+                        check.setText(sb.toString().trim());
+                        ok.setEnabled(s.leftMatched > 0);
+                    } catch (Exception ex) {
+                        check.setText("Couldn't check the match: " + ex.getMessage());
+                    }
+                }
+            }.execute();
+        };
+
+        boolean[] busy = {false};
+        Runnable fillKeys = () -> {
+            busy[0] = true;
+            DataTable L = (DataTable) leftBox.getSelectedItem(), R = (DataTable) rightBox.getSelectedItem();
+            for (int i = 0; i < KEYS; i++) {
+                lk[i].removeAllItems();
+                rk[i].removeAllItems();
+                if (i > 0) {
+                    lk[i].addItem("(none)");
+                    rk[i].addItem("(none)");
+                }
+                if (L != null) for (Column c : L.cols) lk[i].addItem(c.name);
+                if (R != null) for (Column c : R.cols) rk[i].addItem(c.name);
+            }
+            if (L != null && R != null && L != R) {
+                Join.Key k = Join.suggest(L, R);
+                if (k != null) {
+                    lk[0].setSelectedIndex(k.left());
+                    rk[0].setSelectedIndex(k.right());
+                }
+            }
+            busy[0] = false;
+            recheck.run();
+        };
+        java.awt.event.ActionListener changed = e -> { if (!busy[0]) recheck.run(); };
+        for (int i = 0; i < KEYS; i++) {
+            lk[i].addActionListener(changed);
+            rk[i].addActionListener(changed);
+        }
+        leftBox.addActionListener(e -> fillKeys.run());
+        rightBox.addActionListener(e -> fillKeys.run());
+        for (JRadioButton b : new JRadioButton[]{leftKind, innerKind, fullKind}) b.addActionListener(e -> {});
+
+        add.addActionListener(e -> addTablesFromFile(dlg, ts -> {
+            busy[0] = true;
+            DataTable lsel = (DataTable) leftBox.getSelectedItem();
+            lm.removeAllElements();
+            rm.removeAllElements();
+            for (DataTable t : library) {
+                lm.addElement(t);
+                rm.addElement(t);
+            }
+            busy[0] = false;
+            DataTable left = lsel != null && library.contains(lsel) ? lsel : (table != null && library.contains(table) ? table : ts.get(0));
+            DataTable right = ts.get(0) != left ? ts.get(0) : (ts.size() > 1 ? ts.get(1) : null);
+            if (right == null) for (DataTable t : library) if (t != left) right = t;
+            busy[0] = true;
+            leftBox.setSelectedItem(left);
+            busy[0] = false;
+            if (right != null) rightBox.setSelectedItem(right);   // fires fillKeys
+            else fillKeys.run();
+            if (ts.size() > 2)
+                JOptionPane.showMessageDialog(dlg, ts.size() + " sheets were added. Pick the two you want in the lists; you can join the result with another one afterwards.", "Sheets added", JOptionPane.INFORMATION_MESSAGE);
+        }));
+        cancel.addActionListener(e -> dlg.dispose());
+        ok.addActionListener(e -> {
+            DataTable L = (DataTable) leftBox.getSelectedItem(), R = (DataTable) rightBox.getSelectedItem();
+            List<Join.Key> keys = joinKeys(L, R, lk, rk);
+            Join.Kind kind = innerKind.isSelected() ? Join.Kind.INNER : fullKind.isSelected() ? Join.Kind.FULL : Join.Kind.LEFT;
+            ok.setEnabled(false);
+            dlg.setCursor(Cursor.getPredefinedCursor(Cursor.WAIT_CURSOR));
+            new SwingWorker<Join.Joined, Void>() {
+                protected Join.Joined doInBackground() throws Exception {
+                    return Join.join(L, R, keys, kind, Join.shortName(L.name) + " + " + Join.shortName(R.name));
+                }
+
+                protected void done() {
+                    dlg.setCursor(Cursor.getDefaultCursor());
+                    try {
+                        Join.Joined j = get();
+                        dlg.dispose();
+                        showJoined(j);
+                    } catch (Exception ex) {
+                        Throwable c = ex.getCause() != null ? ex.getCause() : ex;
+                        JOptionPane.showMessageDialog(dlg, c.getMessage(), "Can't join", JOptionPane.WARNING_MESSAGE);
+                        ok.setEnabled(true);
+                    }
+                }
+            }.execute();
+        });
+
+        // ---- layout
+        JPanel p = new JPanel(new GridBagLayout());
+        p.setBorder(BorderFactory.createEmptyBorder(12, 14, 8, 14));
+        GridBagConstraints g = new GridBagConstraints();
+        g.insets = new Insets(3, 4, 3, 4);
+        g.anchor = GridBagConstraints.WEST;
+        g.fill = GridBagConstraints.HORIZONTAL;
+        int row = 0;
+        g.gridx = 0; g.gridy = row; g.weightx = 0; p.add(new JLabel("Left table:"), g);
+        g.gridx = 1; g.gridwidth = 2; g.weightx = 1; p.add(leftBox, g); g.gridwidth = 1;
+        row++;
+        g.gridx = 0; g.gridy = row; g.weightx = 0; p.add(new JLabel("Right table:"), g);
+        g.gridx = 1; g.gridwidth = 2; g.weightx = 1; p.add(rightBox, g); g.gridwidth = 1;
+        row++;
+        g.gridx = 1; g.gridy = row; g.weightx = 0; g.fill = GridBagConstraints.NONE; p.add(add, g); g.fill = GridBagConstraints.HORIZONTAL;
+        row++;
+        g.gridx = 0; g.gridy = row; g.gridwidth = 3; p.add(new JLabel("<html><b>Match rows where these columns are equal</b> (capitals and extra spaces are ignored):</html>"), g); g.gridwidth = 1;
+        row++;
+        for (int i = 0; i < KEYS; i++) {
+            g.gridx = 0; g.gridy = row; g.weightx = 0; p.add(new JLabel(i == 0 ? "Key:" : "and:"), g);
+            g.gridx = 1; g.weightx = 1; p.add(lk[i], g);
+            g.gridx = 2; p.add(rk[i], g);
+            row++;
+        }
+        g.gridx = 0; g.gridy = row; g.gridwidth = 3; g.weightx = 1; p.add(new JLabel("<html><b>Which rows to keep</b></html>"), g); row++;
+        g.gridy = row++; p.add(leftKind, g);
+        g.gridy = row++; p.add(innerKind, g);
+        g.gridy = row++; p.add(fullKind, g);
+        g.gridy = row++; p.add(new JLabel("<html><b>Match check</b></html>"), g);
+        g.gridy = row++; g.fill = GridBagConstraints.BOTH; g.weighty = 1; p.add(new JScrollPane(check), g);
+        g.weighty = 0; g.fill = GridBagConstraints.HORIZONTAL;
+        JPanel btns = new JPanel(new FlowLayout(FlowLayout.RIGHT, 8, 4));
+        btns.add(cancel);
+        btns.add(ok);
+        dlg.add(p, BorderLayout.CENTER);
+        dlg.add(btns, BorderLayout.SOUTH);
+        dlg.getRootPane().setDefaultButton(ok);
+        dlg.setSize(760, 560);
+        dlg.setLocationRelativeTo(this);
+        joinDlg = dlg;
+        fillKeys.run();
+        dlg.setVisible(true);
+        joinDlg = null;
+    }
+
+    private JDialog joinDlg;
+
+    private static List<Join.Key> joinKeys(DataTable L, DataTable R, JComboBox<String>[] lk, JComboBox<String>[] rk) {
+        List<Join.Key> keys = new ArrayList<>();
+        if (L == null || R == null) return keys;
+        for (int i = 0; i < lk.length; i++) {
+            int a = lk[i].getSelectedIndex() - (i > 0 ? 1 : 0), b = rk[i].getSelectedIndex() - (i > 0 ? 1 : 0);
+            if (a < 0 || b < 0 || a >= L.cols.size() || b >= R.cols.size()) continue;
+            keys.add(new Join.Key(a, b));
+        }
+        return keys;
+    }
+
+    private void showJoined(Join.Joined j) {
+        setTable(j.table(), false);
+        StringBuilder sb = new StringBuilder();
+        for (String n : j.notes()) {
+            boolean warn = n.startsWith("Warning");
+            sb.append(warn ? "<span style='color:" + RED + "'>" : "").append(esc(n)).append(warn ? "</span>" : "").append("<br>");
+        }
+        say("Join", sb.toString(), BLUE);
+    }
+
+    static DataTable readCsvFile(File f) throws IOException {
+        byte[] b = Files.readAllBytes(f.toPath());
+        String s = new String(b, StandardCharsets.UTF_8);
+        if (s.indexOf('�') >= 0) s = new String(b, Charset.forName("windows-1252"));
+        return DataTable.fromCsv(f.getName(), s);
+    }
+
+    // ---------------------------------------------------------------- calculated columns and cleaning (UI)
+    private void refreshColumnsView() {
+        if (dataTable.getModel() instanceof AbstractTableModel am) am.fireTableStructureChanged();
+        packColumns(dataTable);
+        rebuildExamples();
+        updateStatus();
+    }
+
+    /** Handles "add column margin = Revenue - Cost" typed in the chat. Returns true if the sentence was a column definition. */
+    private boolean tryDefineColumn(String q) {
+        if (table == null) return false;
+        Calc.Def def = Calc.parseDefinition(q);
+        if (def == null) return false;
+        Calc.Compiled comp = null;
+        Calc.CalcException failure = null;
+        if (def.expr().isEmpty()) failure = new Calc.CalcException("Tell me what to calculate, for example: add column Margin = Revenue - Cost");
+        else try {
+            comp = Calc.compile(def.expr(), table);
+        } catch (Calc.CalcException e) {
+            failure = e;
+        }
+        if (comp == null && !def.explicit()) return false;   // "x = y" that isn't a formula: treat as a normal question
+        say("You", esc(q), BLUE);
+        input.setText("");
+        if (comp != null) {
+            addCalculatedColumn(def.name(), comp);
+            return true;
+        }
+        if (useAI() && !def.expr().isEmpty()) {
+            final String key = new String(keyField.getPassword()).trim(), model = modelField.getText().trim();
+            final DataTable t = table;
+            final String why = failure.getMessage();
+            setBusy(true, "Asking Claude for a formula...");
+            new SwingWorker<String[], Void>() {
+                protected String[] doInBackground() throws Exception { return new Claude(key, model).formula(q, t); }
+
+                protected void done() {
+                    setBusy(false, null);
+                    try {
+                        String[] r = get();
+                        if (table != t) return;
+                        Calc.Compiled c = Calc.compile(r[1], t);
+                        addCalculatedColumn(r[0], c);
+                    } catch (Exception ex) {
+                        Throwable c = ex.getCause() != null ? ex.getCause() : ex;
+                        say("Analyst", esc(why) + "<br>" + esc("Claude couldn't help either: " + c.getMessage()), RED);
+                    }
+                }
+            }.execute();
+            return true;
+        }
+        say("Analyst", esc(failure.getMessage()) + "<br><span style='color:" + GREY + "'>Examples: add column Margin = Revenue - Cost &nbsp;|&nbsp; add column Price per unit = Amount / Units &nbsp;|&nbsp; add column Discount share = Discount as a percent of Amount</span>", RED);
+        return true;
+    }
+
+    /** Adds the column to the current table in place and tells the user what it holds. Returns the column, or null on error. */
+    private Column addCalculatedColumn(String name, Calc.Compiled comp) {
+        try {
+            Calc.Built b = Calc.build(name, comp, table);
+            table.cols.add(b.column());
+            refreshColumnsView();
+            StringBuilder sb = new StringBuilder("Added column <b>" + esc(b.column().name) + "</b> = " + esc(comp.text()) + ". First values: " + esc(String.join(", ", b.samples())) + ".");
+            if (b.blank() > 0) sb.append(" ").append(String.format(Locale.US, "%,d", b.blank())).append(b.blank() == 1 ? " row is" : " rows are").append(" blank because an input was blank or the formula divided by zero.");
+            String group = null;
+            for (Column c : table.cols) if (c.type == ColType.TEXT && c.distinctCount() >= 2 && c.distinctCount() <= 12) {
+                group = c.name;
+                break;
+            }
+            sb.append("<br><span style='color:").append(GREY).append("'>Use it like any other column");
+            if (group != null) sb.append(", e.g. \"Average ").append(esc(b.column().name)).append(" by ").append(esc(group)).append("\"");
+            sb.append(". Remove it any time in <b>Clean data...</b>.</span>");
+            say("Analyst", sb.toString(), GREEN);
+            return b.column();
+        } catch (Calc.CalcException e) {
+            say("Analyst", esc(e.getMessage()), RED);
+            return null;
+        }
+    }
+
+    private boolean looksLikeCleanRequest(String q) {
+        String l = q.toLowerCase(Locale.ROOT).trim();
+        return l.matches("(?s)^(please\\s+)?(clean|tidy)(\\s*up)?\\b.*\\b(data|file|table|columns?|dataset|spreadsheet)\\b.*")
+                || l.matches("(?s)^(please\\s+)?(clean|tidy)(\\s*up)?\\s*[.!]?$")
+                || l.matches("(?s).*\\b(remove|delete|drop|get rid of)\\s+(the\\s+)?(duplicates?|duplicate rows)\\b.*")
+                || l.matches("(?s)^(please\\s+)?(fix|change|set|correct)\\s+(the\\s+)?(column\\s+)?(types?|data types?|formats?)\\b.*");
+    }
+
+    private void cleanDialog() {
+        if (table == null) {
+            say("Analyst", "Load a CSV or Excel file first, or click <b>Demo data</b>.", RED);
+            return;
+        }
+        final DataTable t = table;
+        JDialog dlg = new JDialog(this, "Clean data and columns", true);
+
+        DefaultTableModel cm = new DefaultTableModel(new Object[]{"Keep", "Column name", "Detected as", "Read as", "Example values"}, 0) {
+            public boolean isCellEditable(int r, int c) { return c == 0 || c == 1 || c == 3; }
+
+            public Class<?> getColumnClass(int c) { return c == 0 ? Boolean.class : c == 3 ? Clean.Mode.class : String.class; }
+        };
+        Runnable fillRows = () -> {
+            cm.setRowCount(0);
+            for (Column c : t.cols) {
+                StringBuilder ex = new StringBuilder();
+                int k = 0;
+                for (String v : c.distinct()) {
+                    if (k++ >= 3) break;
+                    ex.append(ex.length() > 0 ? ", " : "").append(v.length() > 18 ? v.substring(0, 17) + "…" : v);
+                }
+                String det = c.type.name().toLowerCase(Locale.ROOT) + (c.type == ColType.NUMBER && c.euro ? " (1.234,56 style)" : "");
+                cm.addRow(new Object[]{Boolean.TRUE, c.name, det, Clean.Mode.AUTO, ex.toString()});
+            }
+        };
+        fillRows.run();
+        JTable ct = new JTable(cm);
+        ct.setRowHeight(24);
+        ct.getColumnModel().getColumn(0).setMaxWidth(50);
+        ct.getColumnModel().getColumn(1).setPreferredWidth(170);
+        ct.getColumnModel().getColumn(2).setPreferredWidth(120);
+        ct.getColumnModel().getColumn(3).setPreferredWidth(220);
+        ct.getColumnModel().getColumn(4).setPreferredWidth(260);
+        ct.getColumnModel().getColumn(3).setCellEditor(new DefaultCellEditor(new JComboBox<>(Clean.Mode.values())));
+        ct.setToolTipText("Untick Keep to remove a column. Edit a name to rename it. Use Read as when the detected type is wrong.");
+
+        JCheckBox blanksBox = new JCheckBox("Treat these values as empty:", true);
+        JTextField blanksField = new JTextField(Clean.DEFAULT_BLANKS, 34);
+        JCheckBox dedupeBox = new JCheckBox("Remove duplicate rows", false);
+        JLabel scanLabel = new JLabel(" ");
+        scanLabel.setForeground(Color.GRAY);
+        final int[] seq = {0};
+        Runnable rescan = () -> {
+            final int my = ++seq[0];
+            final Set<String> toks = blanksBox.isSelected() ? Clean.parseTokens(blanksField.getText()) : Set.of();
+            scanLabel.setText("Checking...");
+            new SwingWorker<long[], Void>() {
+                protected long[] doInBackground() { return Clean.scan(t, toks); }
+
+                protected void done() {
+                    if (my != seq[0]) return;
+                    try {
+                        long[] s = get();
+                        scanLabel.setText(Clean.num(s[0]) + " cell" + (s[0] == 1 ? "" : "s") + " would become empty. " + Clean.num(s[1]) + " row" + (s[1] == 1 ? " is" : "s are") + " an exact duplicate of an earlier row.");
+                    } catch (Exception ex) {
+                        scanLabel.setText(" ");
+                    }
+                }
+            }.execute();
+        };
+        javax.swing.event.DocumentListener dl = new javax.swing.event.DocumentListener() {
+            public void insertUpdate(javax.swing.event.DocumentEvent e) { rescan.run(); }
+
+            public void removeUpdate(javax.swing.event.DocumentEvent e) { rescan.run(); }
+
+            public void changedUpdate(javax.swing.event.DocumentEvent e) { rescan.run(); }
+        };
+        blanksField.getDocument().addDocumentListener(dl);
+        blanksBox.addActionListener(e -> rescan.run());
+        rescan.run();
+
+        // calculated column section
+        JTextField nameF = new JTextField(14), formulaF = new JTextField(30);
+        JButton addCol = new JButton("Add column");
+        JLabel calcMsg = new JLabel("<html>Example: name <b>Margin</b>, formula <b>Revenue - Cost</b>. You can also write <i>Revenue minus Cost</i>, <i>Amount per Units</i>, <i>Cost as a percent of Revenue</i>.</html>");
+        addCol.addActionListener(e -> {
+            try {
+                Calc.Compiled c = Calc.compile(formulaF.getText(), t);
+                Calc.Built b = Calc.build(nameF.getText(), c, t);
+                t.cols.add(b.column());
+                refreshColumnsView();
+                fillRows.run();
+                rescan.run();
+                calcMsg.setText("<html>Added <b>" + esc(b.column().name) + "</b>. First values: " + esc(String.join(", ", b.samples()))
+                        + (b.blank() > 0 ? ". " + b.blank() + " rows are blank (blank input or division by zero)." : ".") + "</html>");
+                calcMsg.setForeground(new Color(0x26734d));
+                nameF.setText("");
+                formulaF.setText("");
+                say("Analyst", "Added column <b>" + esc(b.column().name) + "</b> = " + esc(c.text()) + ".", GREEN);
+            } catch (Calc.CalcException ex) {
+                calcMsg.setText("<html>" + esc(ex.getMessage()) + "</html>");
+                calcMsg.setForeground(new Color(0xb3261e));
+            }
+        });
+
+        JButton apply = new JButton("Apply cleaning"), close = new JButton("Close");
+        close.addActionListener(e -> dlg.dispose());
+        apply.addActionListener(e -> {
+            if (ct.isEditing()) ct.getCellEditor().stopCellEditing();
+            List<Clean.Spec> specs = new ArrayList<>();
+            boolean changed = false;
+            for (int i = 0; i < cm.getRowCount(); i++) {
+                boolean keep = Boolean.TRUE.equals(cm.getValueAt(i, 0));
+                String nm = String.valueOf(cm.getValueAt(i, 1)).trim();
+                Clean.Mode mode = (Clean.Mode) cm.getValueAt(i, 3);
+                specs.add(new Clean.Spec(i, keep, nm, mode));
+                if (!keep || mode != Clean.Mode.AUTO || !nm.equals(t.cols.get(i).name)) changed = true;
+            }
+            Set<String> toks = blanksBox.isSelected() ? Clean.parseTokens(blanksField.getText()) : Set.of();
+            long[] sc = Clean.scan(t, toks);
+            if (sc[0] > 0 || (dedupeBox.isSelected() && sc[1] > 0)) changed = true;
+            if (!changed) {
+                JOptionPane.showMessageDialog(dlg, "There is nothing to change with these settings.", "Clean data", JOptionPane.INFORMATION_MESSAGE);
+                return;
+            }
+            apply.setEnabled(false);
+            dlg.setCursor(Cursor.getPredefinedCursor(Cursor.WAIT_CURSOR));
+            new SwingWorker<Clean.Outcome, Void>() {
+                protected Clean.Outcome doInBackground() throws Exception { return Clean.apply(t, specs, toks, dedupeBox.isSelected()); }
+
+                protected void done() {
+                    dlg.setCursor(Cursor.getDefaultCursor());
+                    try {
+                        Clean.Outcome o = get();
+                        dlg.dispose();
+                        setTable(o.table(), false);
+                        StringBuilder sb = new StringBuilder();
+                        for (String n : o.notes()) sb.append(esc(n)).append("<br>");
+                        say("Clean", sb.toString(), BLUE);
+                    } catch (Exception ex) {
+                        Throwable c = ex.getCause() != null ? ex.getCause() : ex;
+                        JOptionPane.showMessageDialog(dlg, c.getMessage(), "Can't clean", JOptionPane.WARNING_MESSAGE);
+                        apply.setEnabled(true);
+                    }
+                }
+            }.execute();
+        });
+
+        JPanel top = new JPanel(new BorderLayout(0, 4));
+        top.setBorder(BorderFactory.createTitledBorder("Columns"));
+        top.add(new JScrollPane(ct), BorderLayout.CENTER);
+
+        JPanel opts = new JPanel(new GridBagLayout());
+        opts.setBorder(BorderFactory.createTitledBorder("Values and rows"));
+        GridBagConstraints g = new GridBagConstraints();
+        g.insets = new Insets(2, 4, 2, 4);
+        g.anchor = GridBagConstraints.WEST;
+        g.gridx = 0; g.gridy = 0; opts.add(blanksBox, g);
+        g.gridx = 1; g.fill = GridBagConstraints.HORIZONTAL; g.weightx = 1; opts.add(blanksField, g);
+        g.gridx = 0; g.gridy = 1; g.gridwidth = 2; g.weightx = 0; opts.add(dedupeBox, g);
+        g.gridy = 2; opts.add(scanLabel, g);
+
+        JPanel calc = new JPanel(new GridBagLayout());
+        calc.setBorder(BorderFactory.createTitledBorder("Add a calculated column"));
+        GridBagConstraints c2 = new GridBagConstraints();
+        c2.insets = new Insets(2, 4, 2, 4);
+        c2.anchor = GridBagConstraints.WEST;
+        c2.gridx = 0; c2.gridy = 0; calc.add(new JLabel("Name:"), c2);
+        c2.gridx = 1; calc.add(nameF, c2);
+        c2.gridx = 2; calc.add(new JLabel("Formula:"), c2);
+        c2.gridx = 3; c2.fill = GridBagConstraints.HORIZONTAL; c2.weightx = 1; calc.add(formulaF, c2);
+        c2.gridx = 4; c2.fill = GridBagConstraints.NONE; c2.weightx = 0; calc.add(addCol, c2);
+        c2.gridx = 0; c2.gridy = 1; c2.gridwidth = 5; c2.fill = GridBagConstraints.HORIZONTAL; calc.add(calcMsg, c2);
+
+        JPanel lower = new JPanel(new GridLayout(0, 1, 0, 6));
+        lower.add(opts);
+        lower.add(calc);
+        JPanel btns = new JPanel(new FlowLayout(FlowLayout.RIGHT, 8, 4));
+        btns.add(close);
+        btns.add(apply);
+        JPanel south = new JPanel(new BorderLayout());
+        south.add(lower, BorderLayout.CENTER);
+        south.add(btns, BorderLayout.SOUTH);
+        JPanel root = new JPanel(new BorderLayout(0, 6));
+        root.setBorder(BorderFactory.createEmptyBorder(10, 12, 6, 12));
+        root.add(top, BorderLayout.CENTER);
+        root.add(south, BorderLayout.SOUTH);
+        dlg.add(root);
+        dlg.setSize(900, 640);
+        dlg.setLocationRelativeTo(this);
+        cleanDlg = dlg;
+        dlg.setVisible(true);
+        cleanDlg = null;
+    }
+
+    private JDialog cleanDlg;
 
     // ---------------------------------------------------------------- auto-insights
     private void findInsights(DataTable t) {
@@ -596,10 +1226,25 @@ public class DataChat extends JFrame {
     private void ask(String question, Plan preset) {
         final String q = question == null ? "" : question.trim();
         if (q.isEmpty()) return;
+        if (preset == null && q.matches("(?is)^\\s*(please\\s+)?(can you\\s+|could you\\s+)?(join|merge)\\b.*")) {
+            say("You", esc(q), BLUE);
+            input.setText("");
+            say("Analyst", "Opening the join dialog. Pick the two tables and the key column that links them.", GREEN);
+            joinDialog();
+            return;
+        }
         if (table == null) {
             say("Analyst", "Load a CSV first, or click <b>Demo data</b>.", RED);
             return;
         }
+        if (preset == null && looksLikeCleanRequest(q)) {
+            say("You", esc(q), BLUE);
+            input.setText("");
+            say("Analyst", "Opening <b>Clean data</b>. Change column types, rename or remove columns, treat values like N/A as empty, or remove duplicate rows.", GREEN);
+            cleanDialog();
+            return;
+        }
+        if (preset == null && tryDefineColumn(q)) return;
         say("You", esc(q), BLUE);
         input.setText("");
         final DataTable t = table;
@@ -749,6 +1394,9 @@ public class DataChat extends JFrame {
             case BAR:
             case HBAR:
                 return true;
+            case STACK:
+            case STACK100:
+                return cd.additive && ns >= 2;
             default:
                 return false;
         }
@@ -962,6 +1610,67 @@ public class DataChat extends JFrame {
             }
         }
 
+        /** Forces numeric reading ({@code euro}: "1.234,56" style). Returns how many non-blank values could not be read. */
+        int forceNumber(boolean euroStyle) {
+            euro = euroStyle;
+            num = new double[text.length];
+            date = null;
+            dmin = dmax = null;
+            double sum = 0, mn = Double.POSITIVE_INFINITY, mx = Double.NEGATIVE_INFINITY;
+            int cnt = 0, bad = 0;
+            for (int i = 0; i < text.length; i++) {
+                num[i] = text[i].isEmpty() ? Double.NaN : parseNum(text[i], euroStyle);
+                if (Double.isNaN(num[i])) {
+                    if (!text[i].isEmpty()) bad++;
+                    continue;
+                }
+                sum += num[i];
+                cnt++;
+                mn = Math.min(mn, num[i]);
+                mx = Math.max(mx, num[i]);
+            }
+            type = ColType.NUMBER;
+            nmin = cnt == 0 ? Double.NaN : mn;
+            nmax = cnt == 0 ? Double.NaN : mx;
+            nmean = cnt == 0 ? Double.NaN : sum / cnt;
+            return bad;
+        }
+
+        /** Forces date reading with a day-first or month-first order for ambiguous formats. Returns the unreadable count. */
+        int forceDate(boolean dayFirst) {
+            int[] order = dayFirst ? new int[]{0, 1, 2, 4, 5, 6, 7, 8, 9} : new int[]{0, 1, 3, 6, 7, 8, 9};
+            num = null;
+            date = new LocalDate[text.length];
+            dmin = dmax = null;
+            int bad = 0;
+            for (int i = 0; i < text.length; i++) {
+                if (text[i].isEmpty()) continue;
+                LocalDate d = null;
+                for (int k : order) {
+                    d = DATE_PARSERS.get(k).apply(text[i]);
+                    if (d != null) break;
+                }
+                if (d == null && !dayFirst) d = parseWith(trimTime(text[i]), "M-d-yyyy");
+                if (d == null) {
+                    bad++;
+                    continue;
+                }
+                date[i] = d;
+                if (dmin == null || d.isBefore(dmin)) dmin = d;
+                if (dmax == null || d.isAfter(dmax)) dmax = d;
+            }
+            type = ColType.DATE;
+            return bad;
+        }
+
+        void forceText() {
+            type = ColType.TEXT;
+            num = null;
+            date = null;
+            dmin = dmax = null;
+            distinct = null;
+        }
+
         static boolean idLike(String name) {
             String l = name.toLowerCase(Locale.ROOT);
             return l.matches("(.*[\\s_\\-])?id([\\s_\\-].*)?") || name.matches(".*[a-z]ID$") || l.contains("zip")
@@ -1165,6 +1874,957 @@ public class DataChat extends JFrame {
             }
             return sb.toString();
         }
+    }
+
+    // =====================================================================================
+    //  Joins: combine two tables on one or more key columns
+    // =====================================================================================
+    static final class Join {
+        enum Kind { INNER, LEFT, FULL }
+
+        record Key(int left, int right) {}
+
+        static final int MAX_OUT = 1_000_000;
+
+        /** How well two tables line up on a set of keys (computed without building the result). */
+        static final class Stats {
+            int leftRows, rightRows, leftBlank, rightBlank;
+            int leftMatched, rightMatched;          // rows with at least one partner
+            int rightDupKeys;                       // distinct right keys carried by more than one right row
+            int leftFanOut;                         // left rows matching more than one right row
+            long innerRows;                         // what an inner join would produce
+            final List<String> leftSamples = new ArrayList<>(), rightSamples = new ArrayList<>();   // unmatched examples
+            int leftUnmatched() { return leftRows - leftBlank - leftMatched; }
+            int rightUnmatched() { return rightRows - rightBlank - rightMatched; }
+        }
+
+        record Joined(DataTable table, Stats stats, List<String> notes) {}
+
+        static final class IntList {
+            int[] a = new int[2];
+            int n;
+            void add(int v) {
+                if (n == a.length) a = Arrays.copyOf(a, n * 2);
+                a[n++] = v;
+            }
+        }
+
+        // ---- key handling
+        static String norm(String s) {
+            if (s == null) return null;
+            s = s.trim();
+            if (s.isEmpty()) return null;
+            s = s.toLowerCase(Locale.ROOT).replaceAll("\\s+", " ");
+            if (s.matches("[-+]?\\d+(\\.\\d+)?")) {
+                try {
+                    String p = new java.math.BigDecimal(s).stripTrailingZeros().toPlainString();
+                    return p.equals("-0") ? "0" : p;
+                } catch (NumberFormatException ignored) {
+                }
+            }
+            return s;
+        }
+
+        static boolean dateMode(Column a, Column b) { return a.type == ColType.DATE && b.type == ColType.DATE; }
+
+        /** One normalised key per row ({@code null} when any key part is blank). */
+        static String[] keys(DataTable t, List<Column> cols, boolean[] dates) {
+            String[] out = new String[t.rows];
+            StringBuilder sb = new StringBuilder();
+            for (int r = 0; r < t.rows; r++) {
+                sb.setLength(0);
+                boolean ok = true;
+                for (int k = 0; k < cols.size() && ok; k++) {
+                    Column c = cols.get(k);
+                    String v = dates[k] && c.date != null && c.date[r] != null ? c.date[r].toString() : norm(c.text[r]);
+                    if (v == null) ok = false;
+                    else {
+                        if (k > 0) sb.append('\u0001');
+                        sb.append(v);
+                    }
+                }
+                out[r] = ok ? sb.toString() : null;
+            }
+            return out;
+        }
+
+        static String[][] bothKeys(DataTable L, DataTable R, List<Key> keys) {
+            List<Column> lc = new ArrayList<>(), rc = new ArrayList<>();
+            boolean[] dates = new boolean[keys.size()];
+            for (int i = 0; i < keys.size(); i++) {
+                Column a = L.cols.get(keys.get(i).left()), b = R.cols.get(keys.get(i).right());
+                lc.add(a);
+                rc.add(b);
+                dates[i] = dateMode(a, b);
+            }
+            return new String[][]{keys(L, lc, dates), keys(R, rc, dates)};
+        }
+
+        // ---- match quality (cheap: no result is built)
+        static Stats check(DataTable L, DataTable R, List<Key> keys) {
+            String[][] kk = bothKeys(L, R, keys);
+            String[] lk = kk[0], rk = kk[1];
+            Stats s = new Stats();
+            s.leftRows = L.rows;
+            s.rightRows = R.rows;
+            Map<String, Integer> cnt = new HashMap<>();
+            for (String k : rk) {
+                if (k == null) s.rightBlank++;
+                else cnt.merge(k, 1, Integer::sum);
+            }
+            for (int c : cnt.values()) if (c > 1) s.rightDupKeys++;
+            Set<String> seen = new HashSet<>();
+            for (int r = 0; r < lk.length; r++) {
+                String k = lk[r];
+                if (k == null) {
+                    s.leftBlank++;
+                    continue;
+                }
+                Integer c = cnt.get(k);
+                if (c == null) {
+                    if (s.leftSamples.size() < 4 && seen.add(k)) s.leftSamples.add(L.cols.get(keys.get(0).left()).text[r].trim());
+                    continue;
+                }
+                s.leftMatched++;
+                s.innerRows += c;
+                if (c > 1) s.leftFanOut++;
+            }
+            Set<String> leftSet = new HashSet<>();
+            for (String k : lk) if (k != null) leftSet.add(k);
+            Set<String> seenR = new HashSet<>();
+            for (int r = 0; r < rk.length; r++) {
+                String k = rk[r];
+                if (k == null) continue;
+                if (leftSet.contains(k)) s.rightMatched++;
+                else if (s.rightSamples.size() < 4 && seenR.add(k)) s.rightSamples.add(R.cols.get(keys.get(0).right()).text[r].trim());
+            }
+            return s;
+        }
+
+        // ---- the join itself
+        static String shortName(String tableName) {
+            String s = tableName.replaceAll("(?i)\\.(csv|tsv|txt|xlsx|xlsm)", "");
+            return s.length() > 24 ? s.substring(0, 24) : s;
+        }
+
+        static Joined join(DataTable L, DataTable R, List<Key> keys, Kind kind, String name) throws IOException {
+            if (keys.isEmpty()) throw new IOException("Choose at least one key column from each table.");
+            Stats st = check(L, R, keys);
+            if (st.innerRows == 0 && kind == Kind.INNER)
+                throw new IOException(noMatchMessage(L, R, keys, st));
+            String[][] kk = bothKeys(L, R, keys);
+            String[] lk = kk[0], rk = kk[1];
+            Map<String, IntList> idx = new HashMap<>();
+            for (int r = 0; r < rk.length; r++) if (rk[r] != null) idx.computeIfAbsent(rk[r], x -> new IntList()).add(r);
+
+            IntList li = new IntList(), ri = new IntList();
+            boolean[] rightUsed = new boolean[R.rows];
+            for (int l = 0; l < lk.length; l++) {
+                IntList m = lk[l] == null ? null : idx.get(lk[l]);
+                if (m == null) {
+                    if (kind != Kind.INNER) {
+                        li.add(l);
+                        ri.add(-1);
+                    }
+                } else for (int j = 0; j < m.n; j++) {
+                    li.add(l);
+                    ri.add(m.a[j]);
+                    rightUsed[m.a[j]] = true;
+                }
+                if (li.n > MAX_OUT) throw new IOException(tooBig(L, R, keys));
+            }
+            if (kind == Kind.FULL) for (int r = 0; r < R.rows; r++) if (!rightUsed[r]) {
+                li.add(-1);
+                ri.add(r);
+                if (li.n > MAX_OUT) throw new IOException(tooBig(L, R, keys));
+            }
+            int n = li.n;
+            if (n == 0) throw new IOException(noMatchMessage(L, R, keys, st));
+
+            Set<Integer> rightKeyCols = new HashSet<>();
+            for (Key k : keys) rightKeyCols.add(k.right());
+            Map<Integer, Integer> leftKeyToRight = new HashMap<>();
+            for (Key k : keys) leftKeyToRight.putIfAbsent(k.left(), k.right());
+
+            DataTable out = new DataTable(name, n);
+            Set<String> used = new HashSet<>();
+            String rShort = shortName(R.name);
+            Set<String> leftNames = new HashSet<>();
+            for (Column c : L.cols) leftNames.add(DataTable.key(c.name));
+
+            for (int c = 0; c < L.cols.size(); c++) {
+                Column src = L.cols.get(c);
+                Column dst = new Column(unique(used, src.name));
+                dst.text = new String[n];
+                Integer rc = leftKeyToRight.get(c);
+                Column rsrc = rc == null ? null : R.cols.get(rc);
+                for (int i = 0; i < n; i++) {
+                    int l = li.a[i];
+                    dst.text[i] = l >= 0 ? src.text[l] : (rsrc != null ? rsrc.text[ri.a[i]] : "");
+                }
+                dst.detect(src.euro);
+                if (rc == null) labelMissing(dst, li.a, n, src.euro);
+                out.cols.add(dst);
+            }
+            for (int c = 0; c < R.cols.size(); c++) {
+                if (rightKeyCols.contains(c)) continue;
+                Column src = R.cols.get(c);
+                String nm = leftNames.contains(DataTable.key(src.name)) ? src.name + " (" + rShort + ")" : src.name;
+                Column dst = new Column(unique(used, nm));
+                dst.text = new String[n];
+                for (int i = 0; i < n; i++) {
+                    int r = ri.a[i];
+                    dst.text[i] = r >= 0 ? src.text[r] : "";
+                }
+                dst.detect(src.euro);
+                labelMissing(dst, ri.a, n, src.euro);
+                out.cols.add(dst);
+            }
+            return new Joined(out, st, notes(L, R, keys, kind, st, n));
+        }
+
+        static final String NO_MATCH = "(no match)";
+
+        /** Rows with no partner get a visible label in text columns, so they show up in charts instead of silently vanishing. */
+        private static void labelMissing(Column c, int[] idx, int n, boolean euro) {
+            if (c.type != ColType.TEXT) return;
+            boolean any = false;
+            for (int i = 0; i < n; i++) if (idx[i] < 0) {
+                c.text[i] = NO_MATCH;
+                any = true;
+            }
+            if (any) c.detect(euro);
+        }
+
+        private static String unique(Set<String> used, String base) {
+            String h = base;
+            int k = 2;
+            while (!used.add(h.toLowerCase(Locale.ROOT))) h = base + "_" + (k++);
+            return h;
+        }
+
+        static String keyText(DataTable L, DataTable R, List<Key> keys) {
+            StringBuilder sb = new StringBuilder();
+            for (int i = 0; i < keys.size(); i++) {
+                String a = L.cols.get(keys.get(i).left()).name, b = R.cols.get(keys.get(i).right()).name;
+                if (i > 0) sb.append(" and ");
+                sb.append(a.equalsIgnoreCase(b) ? a : a + " = " + b);
+            }
+            return sb.toString();
+        }
+
+        static String tooBig(DataTable L, DataTable R, List<Key> keys) {
+            return "That join would produce more than " + String.format(Locale.US, "%,d", MAX_OUT) + " rows. Neither side's key (" + keyText(L, R, keys)
+                    + ") is unique, so every row matches many rows on the other side. Pick a more specific key (add a second key column) or use a table where the key is unique.";
+        }
+
+        static String noMatchMessage(DataTable L, DataTable R, List<Key> keys, Stats st) {
+            StringBuilder sb = new StringBuilder("No rows match on " + keyText(L, R, keys) + ".");
+            if (!st.leftSamples.isEmpty()) sb.append(" ").append(L.name).append(" has values like ").append(String.join(", ", quoted(st.leftSamples))).append(".");
+            if (!st.rightSamples.isEmpty()) sb.append(" ").append(R.name).append(" has values like ").append(String.join(", ", quoted(st.rightSamples))).append(".");
+            sb.append(" Check that you picked the right key columns and that the values are written the same way in both (matching ignores capitals and extra spaces, nothing else).");
+            return sb.toString();
+        }
+
+        private static List<String> quoted(List<String> in) {
+            List<String> o = new ArrayList<>();
+            for (String s : in) o.add("\"" + s + "\"");
+            return o;
+        }
+
+        static String pct(int a, int b) { return b == 0 ? "0%" : String.format(Locale.US, "%.0f%%", 100.0 * a / b); }
+
+        static String num(long v) { return String.format(Locale.US, "%,d", v); }
+
+        /** Plain-English summary of what the join did, and what to watch for. */
+        static List<String> notes(DataTable L, DataTable R, List<Key> keys, Kind kind, Stats st, int out) {
+            List<String> n = new ArrayList<>();
+            String how = switch (kind) {
+                case INNER -> "keeping only rows that match in both";
+                case LEFT -> "keeping every row of " + L.name;
+                case FULL -> "keeping every row from both";
+            };
+            n.add("Joined " + L.name + " (" + num(st.leftRows) + " rows) with " + R.name + " (" + num(st.rightRows) + " rows) on " + keyText(L, R, keys) + ", " + how + ". Result: " + num(out) + " rows.");
+            int lu = st.leftUnmatched(), ru = st.rightUnmatched();
+            n.add(pct(st.leftMatched, st.leftRows) + " of " + L.name + " rows found a match (" + num(st.leftMatched) + " of " + num(st.leftRows) + ")"
+                    + (lu > 0 ? "; " + num(lu) + (lu == 1 ? " did not" : " did not") + (kind == Kind.INNER ? " and " + (lu == 1 ? "was" : "were") + " dropped" : ", so " + R.name + "'s columns are blank for " + (lu == 1 ? "it" : "them") + " (text columns say \"" + NO_MATCH + "\")") : "") + ".");
+            if (ru > 0) n.add(num(ru) + " row" + (ru == 1 ? "" : "s") + " of " + R.name + " matched nothing in " + L.name
+                    + (kind == Kind.FULL ? (ru == 1 ? " and was kept." : " and were kept.") : (ru == 1 ? " and was left out." : " and were left out.")));
+            if (st.leftBlank > 0) n.add(num(st.leftBlank) + " row(s) of " + L.name + " had a blank key and can't match anything.");
+            if (st.rightBlank > 0) n.add(num(st.rightBlank) + " row(s) of " + R.name + " had a blank key and can't match anything.");
+            if (st.leftFanOut > 0)
+                n.add("Warning: " + num(st.leftFanOut) + " rows of " + L.name + " matched more than one row of " + R.name + ", so they were repeated. Totals and averages of " + L.name
+                        + "'s numbers will count those rows more than once. Use a key that is unique in " + R.name + ", add a second key column, or summarise " + R.name + " first.");
+            else if (st.leftMatched > 0)
+                n.add("Each matched row of " + L.name + " found exactly one row in " + R.name + ", so totals of " + L.name + "'s numbers are unchanged.");
+            if (st.rightDupKeys > 0 && st.leftFanOut == 0)
+                n.add(R.name + " repeats " + num(st.rightDupKeys) + " key value(s), but none of them appear in " + L.name + ".");
+            n.add(keys.size() > 1 ? "The key columns from " + R.name + " were not repeated; the " + L.name + " key columns hold the values." : "The key column from " + R.name + " was not repeated; the " + L.name + " key column holds the values.");
+            return n;
+        }
+
+        // ---- suggest key columns
+        private static boolean candidate(Column c) {
+            if (c.type == ColType.NUMBER) {
+                int nb = 0;
+                for (String s : c.text) if (!s.isBlank()) nb++;
+                if (nb == 0 || c.distinctCount() < 0.9 * nb) return false;
+                for (double v : c.num) if (!Double.isNaN(v) && v != Math.rint(v)) return false;
+            }
+            return c.distinctCount() >= 2;
+        }
+
+        private static Set<String> normSet(Column c, int limit) {
+            Set<String> s = new HashSet<>();
+            for (String t : c.distinct()) {
+                String k = norm(t);
+                if (k != null) s.add(k);
+                if (s.size() >= limit) break;
+            }
+            return s;
+        }
+
+        /** The most plausible single key pair, or {@code null} if nothing lines up convincingly. */
+        static Key suggest(DataTable L, DataTable R) {
+            Key best = null, fallback = null;
+            double bestScore = 0;
+            Map<Column, Set<String>> cache = new IdentityHashMap<>();
+            for (int a = 0; a < L.cols.size(); a++) {
+                Column lc = L.cols.get(a);
+                if (!candidate(lc)) continue;
+                for (int b = 0; b < R.cols.size(); b++) {
+                    Column rc = R.cols.get(b);
+                    if (!candidate(rc)) continue;
+                    boolean same = DataTable.key(lc.name).equals(DataTable.key(rc.name));
+                    if (!same && (lc.type == ColType.NUMBER) != (rc.type == ColType.NUMBER) && lc.type != ColType.TEXT && rc.type != ColType.TEXT) continue;
+                    Set<String> ls = cache.computeIfAbsent(lc, c -> normSet(c, 200_000)), rs = cache.computeIfAbsent(rc, c -> normSet(c, 200_000));
+                    Set<String> small = ls.size() <= rs.size() ? ls : rs, big = small == ls ? rs : ls;
+                    int shared = 0;
+                    for (String s : small) if (big.contains(s)) shared++;
+                    double overlap = small.isEmpty() ? 0 : (double) shared / small.size();
+                    if (overlap < 0.5 || shared < 2) continue;
+                    int nbl = 0, nbr = 0;
+                    for (String s : lc.text) if (!s.isBlank()) nbl++;
+                    for (String s : rc.text) if (!s.isBlank()) nbr++;
+                    double uniq = Math.max(nbl == 0 ? 0 : (double) lc.distinctCount() / nbl, nbr == 0 ? 0 : (double) rc.distinctCount() / nbr);
+                    if (uniq < 0.9) {
+                        if (same && fallback == null) fallback = new Key(a, b);   // same name, but not unique on either side
+                        continue;
+                    }
+                    String ak = DataTable.key(lc.name), bk = DataTable.key(rc.name);
+                    double score = overlap + 0.5 * uniq + (same ? 0.6 : (ak.length() >= 3 && bk.length() >= 3 && (ak.contains(bk) || bk.contains(ak))) ? 0.25 : 0);
+                    if (score > bestScore) {
+                        bestScore = score;
+                        best = new Key(a, b);
+                    }
+                }
+            }
+            return bestScore >= 1.2 ? best : fallback;
+        }
+    }
+
+    // =====================================================================================
+    //  Calculated columns: a small, safe formula language over a table's numeric columns
+    // =====================================================================================
+    static final class Calc {
+        static final class CalcException extends Exception {
+            CalcException(String m) { super(m); }
+        }
+
+        interface Node { double eval(int row); }
+
+        record Def(String name, String expr, boolean explicit) {}
+
+        record Compiled(Node root, List<Column> used, String text) {}
+
+        private record Tok(char kind, String s, double v, Column col) {}   // kinds: n number, c column, o operator, f function
+
+        static final Set<String> FUNCS = Set.of("abs", "round", "floor", "ceil", "sqrt", "ln", "log", "exp", "min", "max", "if", "pow");
+
+        // ---------------------------------------------------------------- finding a definition in a sentence
+        private static final Pattern EXPLICIT = Pattern.compile("(?is)^\\s*(?:please\\s+)?(?:(?:can|could|would)\\s+you\\s+)?(?:add|create|make|define|insert|build|new)\\s+(?:me\\s+)?(?:a\\s+|an\\s+|the\\s+)?(?:new\\s+)?(?:calculated\\s+|computed\\s+|derived\\s+)?(?:column|field|measure|metric)\\b\\s*(.*)$");
+        private static final Pattern CALC_EQ = Pattern.compile("(?is)^\\s*(?:calculate|compute)\\s+(.*=.*)$");
+        private static final Pattern PLAIN_EQ = Pattern.compile("(?s)^\\s*([^=<>!]{1,60}?)\\s*=\\s*([^=].*)$");
+        private static final String[] SEPARATORS = {" defined as ", " which is ", " that is ", " equal to ", " equals ", " as ", " is "};
+
+        /** Looks for "add column margin = Amount - Cost" and friends. {@code null} if the sentence isn't a definition. */
+        static Def parseDefinition(String q) {
+            if (q == null) return null;
+            String s = q.trim().replaceAll("[.!?]+$", "");
+            Matcher m = EXPLICIT.matcher(s);
+            boolean explicit = false;
+            String rest = null;
+            if (m.matches()) {
+                explicit = true;
+                rest = m.group(1).trim();
+            } else if ((m = CALC_EQ.matcher(s)).matches()) {
+                explicit = true;
+                rest = m.group(1).trim();
+            } else if ((m = PLAIN_EQ.matcher(s)).matches() && !s.matches("(?s).*[<>]=?.*") && !s.contains("==")) {
+                String nm = m.group(1).trim(), ex = m.group(2).trim();
+                boolean nameOk = nm.split("\\s+").length <= 4 && nm.matches("[\\p{L}\\p{N}_ %()\\-]+")
+                        && !nm.toLowerCase(Locale.ROOT).matches("(?s).*\\b(show|list|which|what|how|where|when|filter|chart|plot|only|just|excluding|exclude|rows|compare|why|forecast|top|bottom|if|for|with)\\b.*");
+                boolean formulaOk = ex.matches("(?s).*[-+*/^()].*") || ex.toLowerCase(Locale.ROOT).matches("(?s).*\\b(minus|plus|times|per|over|divided|multiplied|percent|percentage)\\b.*");
+                return nameOk && formulaOk ? new Def(cleanName(nm), ex, false) : null;
+            } else return null;
+            rest = rest.replaceFirst("(?i)^(called|named|for|of|showing|with)\\s+", "");
+            if (rest.isEmpty()) return new Def("", "", true);
+            int eq = indexOfAssign(rest);
+            if (eq >= 0) return new Def(cleanName(rest.substring(0, eq)), rest.substring(eq + 1).trim(), true);
+            String lower = rest.toLowerCase(Locale.ROOT);
+            int best = -1, bl = 0;
+            for (String sep : SEPARATORS) {
+                int i = lower.indexOf(sep);
+                if (i > 0 && sep.equals(" as ") && lower.substring(i + 4).matches("^(an? )?(percent|percentage|%).*")) i = -1;
+                if (i > 0 && (best < 0 || i < best)) {
+                    best = i;
+                    bl = sep.length();
+                }
+            }
+            if (best > 0) return new Def(cleanName(rest.substring(0, best)), rest.substring(best + bl).trim(), true);
+            return new Def(cleanName(rest), rest, true);   // "add column revenue per unit": the phrase is both name and formula
+        }
+
+        private static int indexOfAssign(String s) {
+            for (int i = 0; i < s.length(); i++) {
+                if (s.charAt(i) != '=') continue;
+                char p = i > 0 ? s.charAt(i - 1) : ' ', n = i + 1 < s.length() ? s.charAt(i + 1) : ' ';
+                if (p == '<' || p == '>' || p == '!' || p == '=' || n == '=') continue;
+                return i;
+            }
+            return -1;
+        }
+
+        static String cleanName(String s) {
+            s = s.trim().replaceAll("^[\"'\\[]+|[\"'\\]]+$", "").trim();
+            if (s.length() > 60) s = s.substring(0, 60).trim();
+            return s.isEmpty() ? s : Character.toUpperCase(s.charAt(0)) + s.substring(1);
+        }
+
+        // ---------------------------------------------------------------- tokenising
+        private static List<Tok> tokenize(String src, DataTable t) throws CalcException {
+            src = src.replace('\u00D7', '*').replace('\u00F7', '/').replace('\u2212', '-').replace('\u2013', '-');
+            List<Column> byLen = new ArrayList<>(t.cols);
+            byLen.sort((a, b) -> b.name.length() - a.name.length());
+            List<Tok> out = new ArrayList<>();
+            int i = 0, n = src.length();
+            while (i < n) {
+                char c = src.charAt(i);
+                if (Character.isWhitespace(c)) {
+                    i++;
+                    continue;
+                }
+                if (c == '[' || c == '"' || c == '\'') {
+                    char close = c == '[' ? ']' : c;
+                    int j = src.indexOf(close, i + 1);
+                    if (j > i) {
+                        String nm = src.substring(i + 1, j);
+                        Column col = exactOrFind(t, nm);
+                        if (col == null) throw new CalcException("There is no column called \"" + nm + "\". " + available(t));
+                        out.add(new Tok('c', col.name, 0, col));
+                        i = j + 1;
+                        continue;
+                    }
+                }
+                // a column name, longest first, so "Price per unit" beats "Price"
+                Column hit = null;
+                for (Column col : byLen) {
+                    int L = col.name.length();
+                    if (L == 0 || !src.regionMatches(true, i, col.name, 0, L)) continue;
+                    char last = col.name.charAt(L - 1);
+                    char next = i + L < n ? src.charAt(i + L) : ' ';
+                    boolean wordEnd = Character.isLetterOrDigit(last) || last == '_';
+                    if (wordEnd && (Character.isLetterOrDigit(next) || next == '_')) continue;
+                    hit = col;
+                    break;
+                }
+                if (hit != null) {
+                    out.add(new Tok('c', hit.name, 0, hit));
+                    i += hit.name.length();
+                    continue;
+                }
+                if (Character.isDigit(c) || (c == '.' && i + 1 < n && Character.isDigit(src.charAt(i + 1)))) {
+                    Matcher m = Pattern.compile("\\d*\\.?\\d+(?:[eE][-+]?\\d+)?").matcher(src);
+                    m.region(i, n);
+                    if (!m.lookingAt()) throw new CalcException("I couldn't read the number at \"" + src.substring(i) + "\".");
+                    double v = Double.parseDouble(m.group());
+                    int e = m.end();
+                    if (e < n && src.charAt(e) == '%' && (e + 1 >= n || !Character.isLetterOrDigit(src.charAt(e + 1)))) {
+                        v /= 100;
+                        e++;
+                    }
+                    out.add(new Tok('n', m.group(), v, null));
+                    i = e;
+                    continue;
+                }
+                String two = i + 1 < n ? src.substring(i, i + 2) : "";
+                if (two.equals("<=") || two.equals(">=") || two.equals("!=") || two.equals("==") || two.equals("<>")) {
+                    out.add(new Tok('o', two.equals("<>") ? "!=" : two.equals("==") ? "=" : two, 0, null));
+                    i += 2;
+                    continue;
+                }
+                if ("+-*/^(),<>=".indexOf(c) >= 0) {
+                    out.add(new Tok('o', String.valueOf(c), 0, null));
+                    i++;
+                    continue;
+                }
+                if (c == '%') {   // "x % of y"
+                    Matcher m = Pattern.compile("(?i)%\\s*of\\b").matcher(src);
+                    m.region(i, n);
+                    if (m.lookingAt()) {
+                        out.add(new Tok('o', "pct", 0, null));
+                        i = m.end();
+                        continue;
+                    }
+                    throw new CalcException("A lone % isn't understood here. Write 10% for a percentage, or \"X as a percent of Y\".");
+                }
+                if (Character.isLetter(c) || c == '_') {
+                    int j = i;
+                    while (j < n && (Character.isLetterOrDigit(src.charAt(j)) || src.charAt(j) == '_')) j++;
+                    String word = src.substring(i, j).toLowerCase(Locale.ROOT);
+                    String tail = src.substring(i).toLowerCase(Locale.ROOT);
+                    Matcher pm = Pattern.compile("^(as an? )?(percent|percentage|%) of\\b").matcher(tail);
+                    if (pm.find()) {
+                        out.add(new Tok('o', "pct", 0, null));
+                        i += pm.end();
+                        continue;
+                    }
+                    if (tail.startsWith("divided by")) { out.add(new Tok('o', "/", 0, null)); i += 10; continue; }
+                    if (tail.startsWith("multiplied by")) { out.add(new Tok('o', "*", 0, null)); i += 13; continue; }
+                    switch (word) {
+                        case "minus", "less", "subtract" -> { out.add(new Tok('o', "-", 0, null)); i = j; continue; }
+                        case "plus", "and" -> { out.add(new Tok('o', "+", 0, null)); i = j; continue; }
+                        case "times" -> { out.add(new Tok('o', "*", 0, null)); i = j; continue; }
+                        case "over", "per", "by" -> { out.add(new Tok('o', "/", 0, null)); i = j; continue; }
+                        case "of" -> { out.add(new Tok('o', "*", 0, null)); i = j; continue; }
+                        default -> { }
+                    }
+                    int k = j;
+                    while (k < n && src.charAt(k) == ' ') k++;
+                    if (k < n && src.charAt(k) == '(' && FUNCS.contains(word)) {
+                        out.add(new Tok('f', word, 0, null));
+                        i = j;
+                        continue;
+                    }
+                    Column near = uniqueMatch(t, src.substring(i, j));
+                    if (near != null) {
+                        out.add(new Tok('c', near.name, 0, near));
+                        i = j;
+                        continue;
+                    }
+                    throw new CalcException("I don't know what \"" + src.substring(i, j) + "\" is. " + available(t));
+                }
+                throw new CalcException("I didn't understand \"" + c + "\" in the formula.");
+            }
+            return out;
+        }
+
+        private static Column exactOrFind(DataTable t, String nm) {
+            for (Column c : t.cols) if (c.name.equalsIgnoreCase(nm.trim())) return c;
+            return t.find(nm);
+        }
+
+        /** A single word that is a unique substring of exactly one column name ("units" for "Units Sold"). */
+        private static Column uniqueMatch(DataTable t, String w) {
+            if (w.length() < 3) return null;
+            Column found = null;
+            for (Column c : t.cols) {
+                String cn = DataTable.key(c.name), k = DataTable.key(w);
+                if (cn.equals(k) || (c.name.toLowerCase(Locale.ROOT).matches(".*\\b" + Pattern.quote(w.toLowerCase(Locale.ROOT)) + "\\b.*"))) {
+                    if (found != null && found != c) return null;
+                    found = c;
+                }
+            }
+            return found;
+        }
+
+        static String available(DataTable t) {
+            StringBuilder sb = new StringBuilder("Numeric columns you can use: ");
+            int k = 0;
+            for (Column c : t.cols) if (c.type == ColType.NUMBER) sb.append(k++ > 0 ? ", " : "").append(c.name);
+            return k == 0 ? "This table has no numeric columns." : sb.toString() + ".";
+        }
+
+        // ---------------------------------------------------------------- parsing
+        private static final class Parser {
+            final List<Tok> toks;
+            int p;
+            final Set<Column> used = new LinkedHashSet<>();
+
+            Parser(List<Tok> toks) { this.toks = toks; }
+
+            Tok peek() { return p < toks.size() ? toks.get(p) : null; }
+
+            boolean isOp(String... ops) {
+                Tok t = peek();
+                if (t == null || t.kind() != 'o') return false;
+                for (String o : ops) if (t.s().equals(o)) return true;
+                return false;
+            }
+
+            Node parse() throws CalcException {
+                if (toks.isEmpty()) throw new CalcException("The formula is empty.");
+                Node n = compare();
+                if (p < toks.size()) throw new CalcException("I couldn't make sense of the formula after \"" + toks.get(p).s() + "\". Check the operators between columns.");
+                return n;
+            }
+
+            Node compare() throws CalcException {
+                Node l = add();
+                while (isOp("<", ">", "<=", ">=", "=", "!=")) {
+                    String op = toks.get(p++).s();
+                    Node r = add(), lf = l;
+                    l = row -> {
+                        double a = lf.eval(row), b = r.eval(row);
+                        if (Double.isNaN(a) || Double.isNaN(b)) return Double.NaN;
+                        boolean ok = switch (op) {
+                            case "<" -> a < b;
+                            case ">" -> a > b;
+                            case "<=" -> a <= b;
+                            case ">=" -> a >= b;
+                            case "=" -> a == b;
+                            default -> a != b;
+                        };
+                        return ok ? 1 : 0;
+                    };
+                }
+                return l;
+            }
+
+            Node add() throws CalcException {
+                Node l = mul();
+                while (isOp("+", "-")) {
+                    boolean plus = toks.get(p++).s().equals("+");
+                    Node r = mul(), lf = l;
+                    l = plus ? row -> lf.eval(row) + r.eval(row) : row -> lf.eval(row) - r.eval(row);
+                }
+                return l;
+            }
+
+            Node mul() throws CalcException {
+                Node l = unary();
+                while (isOp("*", "/", "pct")) {
+                    String op = toks.get(p++).s();
+                    Node r = unary(), lf = l;
+                    l = switch (op) {
+                        case "*" -> row -> lf.eval(row) * r.eval(row);
+                        case "/" -> row -> {
+                            double d = r.eval(row);
+                            return d == 0 ? Double.NaN : lf.eval(row) / d;
+                        };
+                        default -> row -> {
+                            double d = r.eval(row);
+                            return d == 0 ? Double.NaN : lf.eval(row) / d * 100;
+                        };
+                    };
+                }
+                return l;
+            }
+
+            Node unary() throws CalcException {
+                if (isOp("-")) {
+                    p++;
+                    Node x = unary();
+                    return row -> -x.eval(row);
+                }
+                if (isOp("+")) {
+                    p++;
+                    return unary();
+                }
+                return power();
+            }
+
+            Node power() throws CalcException {
+                Node b = atom();
+                if (isOp("^")) {
+                    p++;
+                    Node e = unary();
+                    return row -> Math.pow(b.eval(row), e.eval(row));
+                }
+                return b;
+            }
+
+            Node atom() throws CalcException {
+                Tok t = peek();
+                if (t == null) throw new CalcException("The formula ends too early: something is missing after the last operator.");
+                p++;
+                switch (t.kind()) {
+                    case 'n': {
+                        double v = t.v();
+                        return row -> v;
+                    }
+                    case 'c': {
+                        Column c = t.col();
+                        if (c.type != ColType.NUMBER) throw new CalcException("\"" + c.name + "\" isn't a numeric column (it holds " + c.type.name().toLowerCase(Locale.ROOT) + "), so it can't be used in arithmetic.");
+                        used.add(c);
+                        double[] v = c.num;
+                        return row -> v[row];
+                    }
+                    case 'f': {
+                        if (!isOp("(")) throw new CalcException("Expected ( after " + t.s() + ".");
+                        p++;
+                        List<Node> args = new ArrayList<>();
+                        if (!isOp(")")) {
+                            args.add(compare());
+                            while (isOp(",")) {
+                                p++;
+                                args.add(compare());
+                            }
+                        }
+                        if (!isOp(")")) throw new CalcException("Missing ) after the arguments of " + t.s() + ".");
+                        p++;
+                        return func(t.s(), args);
+                    }
+                    default:
+                        if (t.s().equals("(")) {
+                            Node n = compare();
+                            if (!isOp(")")) throw new CalcException("A ( was never closed.");
+                            p++;
+                            return n;
+                        }
+                        throw new CalcException("Unexpected \"" + t.s() + "\" in the formula.");
+                }
+            }
+
+            Node func(String f, List<Node> a) throws CalcException {
+                int n = a.size();
+                switch (f) {
+                    case "abs", "floor", "ceil", "sqrt", "ln", "log", "exp": {
+                        if (n != 1) throw new CalcException(f + " takes one value.");
+                        Node x = a.get(0);
+                        return row -> {
+                            double v = x.eval(row);
+                            return switch (f) {
+                                case "abs" -> Math.abs(v);
+                                case "floor" -> Math.floor(v);
+                                case "ceil" -> Math.ceil(v);
+                                case "sqrt" -> v < 0 ? Double.NaN : Math.sqrt(v);
+                                case "ln" -> v <= 0 ? Double.NaN : Math.log(v);
+                                case "log" -> v <= 0 ? Double.NaN : Math.log10(v);
+                                default -> Math.exp(v);
+                            };
+                        };
+                    }
+                    case "round": {
+                        if (n < 1 || n > 2) throw new CalcException("round takes a value and optionally the number of decimals, e.g. round(x, 2).");
+                        Node x = a.get(0), d = n == 2 ? a.get(1) : row -> 0;
+                        return row -> {
+                            double v = x.eval(row), dd = d.eval(row);
+                            if (Double.isNaN(v) || Double.isNaN(dd)) return Double.NaN;
+                            return new java.math.BigDecimal(v).setScale((int) Math.max(0, Math.min(12, dd)), java.math.RoundingMode.HALF_UP).doubleValue();
+                        };
+                    }
+                    case "pow": {
+                        if (n != 2) throw new CalcException("pow takes two values: pow(base, exponent).");
+                        return row -> Math.pow(a.get(0).eval(row), a.get(1).eval(row));
+                    }
+                    case "min", "max": {
+                        if (n < 2) throw new CalcException(f + " needs at least two values.");
+                        boolean mx = f.equals("max");
+                        return row -> {
+                            double r = a.get(0).eval(row);
+                            for (int k = 1; k < n; k++) {
+                                double v = a.get(k).eval(row);
+                                if (Double.isNaN(v) || Double.isNaN(r)) return Double.NaN;
+                                r = mx ? Math.max(r, v) : Math.min(r, v);
+                            }
+                            return r;
+                        };
+                    }
+                    case "if": {
+                        if (n != 3) throw new CalcException("if takes three parts: if(condition, value if true, value if false), e.g. if(Amount > 100, 1, 0).");
+                        return row -> {
+                            double c = a.get(0).eval(row);
+                            if (Double.isNaN(c)) return Double.NaN;
+                            return c != 0 ? a.get(1).eval(row) : a.get(2).eval(row);
+                        };
+                    }
+                    default:
+                        throw new CalcException("Unknown function " + f + ".");
+                }
+            }
+        }
+
+        static Compiled compile(String expr, DataTable t) throws CalcException {
+            if (expr == null || expr.isBlank()) throw new CalcException("The formula is empty.");
+            Parser ps = new Parser(tokenize(expr, t));
+            Node root = ps.parse();
+            if (ps.used.isEmpty()) throw new CalcException("The formula doesn't use any column, so every row would get the same value. Include at least one numeric column. " + available(t));
+            return new Compiled(root, new ArrayList<>(ps.used), expr.trim());
+        }
+
+        record Built(Column column, int blank, List<String> samples) {}
+
+        /** Evaluates the formula for every row and returns a ready-to-add numeric column. */
+        static Built build(String name, Compiled c, DataTable t) throws CalcException {
+            if (name == null || name.isBlank()) throw new CalcException("The new column needs a name.");
+            for (Column e : t.cols) if (e.name.equalsIgnoreCase(name.trim()))
+                throw new CalcException("There is already a column called \"" + e.name + "\". Choose a different name (or remove that column first in Clean data...).");
+            Column col = new Column(name.trim());
+            col.type = ColType.NUMBER;
+            col.text = new String[t.rows];
+            col.num = new double[t.rows];
+            double sum = 0, mn = Double.POSITIVE_INFINITY, mx = Double.NEGATIVE_INFINITY;
+            int cnt = 0, blank = 0;
+            List<String> samples = new ArrayList<>();
+            for (int r = 0; r < t.rows; r++) {
+                double v = c.root().eval(r);
+                if (Double.isNaN(v) || Double.isInfinite(v)) {
+                    col.num[r] = Double.NaN;
+                    col.text[r] = "";
+                    blank++;
+                    continue;
+                }
+                col.num[r] = v;
+                col.text[r] = new java.math.BigDecimal(v).setScale(6, java.math.RoundingMode.HALF_UP).stripTrailingZeros().toPlainString();
+                if (col.text[r].equals("-0")) col.text[r] = "0";
+                sum += v;
+                cnt++;
+                mn = Math.min(mn, v);
+                mx = Math.max(mx, v);
+                if (samples.size() < 3) samples.add(Fmt.full(v));
+            }
+            if (cnt == 0) throw new CalcException("The formula gives no value for any row (every row has a blank input or divides by zero).");
+            col.nmin = mn;
+            col.nmax = mx;
+            col.nmean = sum / cnt;
+            return new Built(col, blank, samples);
+        }
+    }
+
+    // =====================================================================================
+    //  Cleaning: type overrides, renames, "treat as empty" values, duplicate rows, dropped columns
+    // =====================================================================================
+    static final class Clean {
+        enum Mode {
+            AUTO("Auto-detect"), NUM_US("Number (1,234.56)"), NUM_EU("Number (1.234,56)"),
+            DATE_DMY("Date (day first: 31/12/2026)"), DATE_MDY("Date (month first: 12/31/2026)"), TEXT("Text");
+
+            final String label;
+
+            Mode(String label) { this.label = label; }
+
+            @Override
+            public String toString() { return label; }
+        }
+
+        record Spec(int src, boolean keep, String name, Mode mode) {}
+
+        record Outcome(DataTable table, List<String> notes) {}
+
+        static final String DEFAULT_BLANKS = "N/A, NA, #N/A, null, NaN, -, --, ?";
+
+        static Set<String> parseTokens(String s) {
+            Set<String> out = new LinkedHashSet<>();
+            if (s == null) return out;
+            for (String part : s.split(",")) {
+                String t = part.trim().toLowerCase(Locale.ROOT);
+                if (!t.isEmpty()) out.add(t);
+            }
+            return out;
+        }
+
+        static boolean isBlankToken(String v, Set<String> tokens) {
+            return !tokens.isEmpty() && !v.isEmpty() && tokens.contains(v.trim().toLowerCase(Locale.ROOT));
+        }
+
+        /** {cells that would become empty, rows that duplicate an earlier row}. */
+        static long[] scan(DataTable t, Set<String> tokens) {
+            long cells = 0;
+            if (!tokens.isEmpty()) for (Column c : t.cols) for (String v : c.text) if (isBlankToken(v, tokens)) cells++;
+            long dups = 0;
+            Set<String> seen = new HashSet<>();
+            StringBuilder sb = new StringBuilder();
+            for (int r = 0; r < t.rows; r++) {
+                sb.setLength(0);
+                for (Column c : t.cols) sb.append(isBlankToken(c.text[r], tokens) ? "" : c.text[r]).append('\u0001');
+                if (!seen.add(sb.toString())) dups++;
+            }
+            return new long[]{cells, dups};
+        }
+
+        static Outcome apply(DataTable t, List<Spec> specs, Set<String> tokens, boolean dedupe) throws IOException {
+            List<Spec> kept = new ArrayList<>();
+            for (Spec s : specs) if (s.keep()) kept.add(s);
+            if (kept.isEmpty()) throw new IOException("Keep at least one column.");
+            List<String> notes = new ArrayList<>();
+
+            // 1. cell text after "treat as empty"
+            String[][] text = new String[kept.size()][];
+            long blanked = 0;
+            Map<String, Integer> tokenHits = new LinkedHashMap<>();
+            for (int k = 0; k < kept.size(); k++) {
+                Column src = t.cols.get(kept.get(k).src());
+                text[k] = new String[t.rows];
+                for (int r = 0; r < t.rows; r++) {
+                    String v = src.text[r];
+                    if (isBlankToken(v, tokens)) {
+                        tokenHits.merge(v.trim(), 1, Integer::sum);
+                        v = "";
+                        blanked++;
+                    }
+                    text[k][r] = v;
+                }
+            }
+            // 2. duplicate rows
+            boolean[] drop = new boolean[t.rows];
+            int dups = 0;
+            if (dedupe) {
+                Set<String> seen = new HashSet<>();
+                StringBuilder sb = new StringBuilder();
+                for (int r = 0; r < t.rows; r++) {
+                    sb.setLength(0);
+                    for (String[] col : text) sb.append(col[r]).append('\u0001');
+                    if (!seen.add(sb.toString())) {
+                        drop[r] = true;
+                        dups++;
+                    }
+                }
+            }
+            int rows = t.rows - dups;
+            if (rows == 0) throw new IOException("That would leave no rows.");
+
+            // 3. build the new columns
+            DataTable out = new DataTable(t.name.endsWith("(cleaned)") ? t.name : t.name + " (cleaned)", rows);
+            Set<String> used = new HashSet<>();
+            int dropped = specs.size() - kept.size(), renamed = 0;
+            for (int k = 0; k < kept.size(); k++) {
+                Spec sp = kept.get(k);
+                Column src = t.cols.get(sp.src());
+                String nm = sp.name() == null || sp.name().isBlank() ? src.name : sp.name().trim();
+                if (!nm.equals(src.name)) renamed++;
+                String base = nm;
+                int n = 2;
+                while (!used.add(nm.toLowerCase(Locale.ROOT))) nm = base + "_" + (n++);
+                Column dst = new Column(nm);
+                dst.text = new String[rows];
+                for (int r = 0, w = 0; r < t.rows; r++) if (!drop[r]) dst.text[w++] = text[k][r];
+                ColType before = src.type;
+                int bad = 0;
+                switch (sp.mode()) {
+                    case AUTO -> dst.detect(src.euro);
+                    case NUM_US -> bad = dst.forceNumber(false);
+                    case NUM_EU -> bad = dst.forceNumber(true);
+                    case DATE_DMY -> bad = dst.forceDate(true);
+                    case DATE_MDY -> bad = dst.forceDate(false);
+                    case TEXT -> dst.forceText();
+                }
+                if (bad > 0) notes.add(num(bad) + " value" + (bad == 1 ? "" : "s") + " in " + nm + " couldn't be read as " + (sp.mode() == Mode.NUM_US || sp.mode() == Mode.NUM_EU ? "numbers" : "dates") + " and " + (bad == 1 ? "was" : "were") + " left blank.");
+                if (dst.type != before)
+                    notes.add(nm + " is now read as " + dst.type.name().toLowerCase(Locale.ROOT) + " (it was " + before.name().toLowerCase(Locale.ROOT) + ").");
+                out.cols.add(dst);
+            }
+            List<String> head = new ArrayList<>();
+            head.add("Cleaned " + t.name + ": " + num(t.rows) + " rows and " + t.cols.size() + " columns became " + num(rows) + " rows and " + out.cols.size() + " columns.");
+            if (blanked > 0) head.add(num(blanked) + " cell" + (blanked == 1 ? "" : "s") + " matching " + String.join(", ", tokenHits.keySet()) + " " + (blanked == 1 ? "was" : "were") + " treated as empty.");
+            if (dups > 0) head.add(num(dups) + " duplicate row" + (dups == 1 ? "" : "s") + " removed (the first copy of each was kept).");
+            if (dropped > 0) head.add(dropped + " column" + (dropped == 1 ? "" : "s") + " removed.");
+            if (renamed > 0) head.add(renamed + " column" + (renamed == 1 ? "" : "s") + " renamed.");
+            head.addAll(notes);
+            return new Outcome(out, head);
+        }
+
+        static String num(long v) { return String.format(Locale.US, "%,d", v); }
     }
 
     // =====================================================================================
@@ -1858,7 +3518,7 @@ public class DataChat extends JFrame {
         }
     }
 
-    enum ChartType { BAR, HBAR, LINE, PIE, SCATTER }
+    enum ChartType { BAR, HBAR, LINE, PIE, SCATTER, STACK, STACK100 }
 
     static final class ChartData {
         ChartType type = ChartType.BAR;
@@ -1867,6 +3527,7 @@ public class DataChat extends JFrame {
         List<String> series = new ArrayList<>();
         List<double[]> values = new ArrayList<>();
         boolean signColors;
+        boolean additive;                           // series are parts of a whole (sums or counts, no negatives): can be stacked
         Set<Integer> highlight = new HashSet<>();
         boolean fixedType;                          // true: this chart can't be switched to another type (forecasts)
         double[] bandLo, bandHi;                    // optional shaded band behind a line chart (a forecast's range)
@@ -3313,6 +4974,12 @@ public class DataChat extends JFrame {
                 for (String s : xs) maxLabel = Math.max(maxLabel, s.length());
                 ChartData cd = new ChartData();
                 cd.type = chartType(p.chart, timeX && !weekday, xs.size(), ss.size(), neg, maxLabel);
+                cd.additive = additive(agg) && !neg && ss.size() >= 2;
+                if (p.chart != null && p.chart.startsWith("stacked")) {
+                    if (cd.additive) cd.type = p.chart.equals("stacked100") ? ChartType.STACK100 : ChartType.STACK;
+                    else r.facts.add("Stacked bars need a second grouping, and totals or counts with no negative values, so I drew an ordinary chart. "
+                            + "Try something like \"revenue by month and category, stacked\".");
+                }
                 cd.title = r.title;
                 cd.xLabel = xName;
                 cd.yLabel = measure;
@@ -3995,7 +5662,7 @@ public class DataChat extends JFrame {
             boolean groupNamed = fresh.x != null && (fresh.message == null || !fresh.message.contains("didn't say how to group"));
             boolean splitCue = has(qn, " (split|break|broken|breakdown|segment|segmented|colou?r|coloured|group|grouped|stack|stacked|further|also|and|then) ")
                     && has(qn, " (by|per|into|across) ");
-            boolean chartWord = List.of("pie", "line", "bar").contains(fresh.chart);
+            boolean chartWord = List.of("pie", "line", "bar", "stacked", "stacked100").contains(fresh.chart);
             boolean dateFilter = fresh.filters.stream().anyMatch(f -> {
                 Column c = t.find(f.column());
                 return c != null && c.type == ColType.DATE;
@@ -4219,7 +5886,7 @@ public class DataChat extends JFrame {
                 }
                 if (chartWord) {
                     p.chart = fresh.chart;
-                    notes.add("as a " + fresh.chart + " chart");
+                    notes.add(fresh.chart.equals("stacked") ? "as stacked bars" : fresh.chart.equals("stacked100") ? "as 100% stacked bars" : "as a " + fresh.chart + " chart");
                 }
             }
             if (notes.isEmpty()) return null;
@@ -4264,6 +5931,39 @@ public class DataChat extends JFrame {
                 if (!inc.isEmpty()) p.filters.add(new Filter(c.name, inc.size() == 1 ? "=" : "in", inc));
                 if (!exc.isEmpty()) p.filters.add(new Filter(c.name, exc.size() == 1 ? "!=" : "not in", exc));
             }
+            // ---- numeric filters: "where units > 5", "discount above 10", "amount between 100 and 500"
+            for (Column c : nums) {
+              List<String> variants = new ArrayList<>(List.of(c.name));
+              String bare = c.name.replaceAll("\\s*[(\\[].*?[)\\]]", "").trim();
+              if (bare.length() >= 3 && !bare.equals(c.name)) variants.add(bare);
+              boolean found = false;
+              for (String vn : variants) {
+                if (found) break;
+                String nm = "(?<![\\p{L}\\p{N}])" + Pattern.quote(vn);
+                Matcher bm = Pattern.compile("(?i)" + nm + "\\s*(?:is\\s+|are\\s+)?between\\s+(-?\\d[\\d,]*(?:\\.\\d+)?)\\s+and\\s+(-?\\d[\\d,]*(?:\\.\\d+)?)").matcher(question);
+                if (bm.find()) {
+                    String lo = bm.group(1).replace(",", ""), hi = bm.group(2).replace(",", "");
+                    p.filters.add(new Filter(c.name, ">=", List.of(lo)));
+                    p.filters.add(new Filter(c.name, "<=", List.of(hi)));
+                    found = true;
+                    continue;
+                }
+                Matcher om = Pattern.compile("(?i)" + nm + "\\s*(?:(?:is|are|was|were)\\s+)?(>=|<=|!=|==|=|>|<|greater than or equal to|at least|no less than|at most|no more than|not more than|not less than|greater than|more than|higher than|larger than|bigger than|over|above|exceeds|exceeding|less than|lower than|smaller than|fewer than|under|below|equals|equal to|not equal to|is not|isn't|is|are|was)\\s*(?:than\\s+)?(-?\\d[\\d,]*(?:\\.\\d+)?)").matcher(question);
+                if (om.find()) {
+                    String w = om.group(1).toLowerCase(Locale.ROOT);
+                    String op = switch (w) {
+                        case ">=", "at least", "no less than", "not less than", "greater than or equal to" -> ">=";
+                        case "<=", "at most", "no more than", "not more than" -> "<=";
+                        case ">", "greater than", "more than", "higher than", "larger than", "bigger than", "over", "above", "exceeds", "exceeding" -> ">";
+                        case "<", "less than", "lower than", "smaller than", "fewer than", "under", "below" -> "<";
+                        case "!=", "not equal to", "is not", "isn't" -> "!=";
+                        default -> "=";
+                    };
+                    p.filters.add(new Filter(c.name, op, List.of(om.group(2).replace(",", ""))));
+                    found = true;
+                }
+              }
+            }
             Set<String> filteredCols = new HashSet<>();
             for (Filter f : p.filters) filteredCols.add(f.column());
 
@@ -4286,6 +5986,12 @@ public class DataChat extends JFrame {
             boolean rowsIntent = has(qn, " (largest|biggest|highest|smallest|lowest|top|bottom|latest|earliest|newest|oldest) ")
                     && has(qn, " (rows|records|transactions|orders|entries|items|individual|single|lines) ")
                     && !has(qn, " (by|per|each|across) ");
+            // "show / list the rows where units > 8": listing the rows that pass a filter
+            String qNoCols = " " + qn;
+            for (Filter f : p.filters) qNoCols = qNoCols.replace(norm(f.column()).trim(), " ");   // "Price per unit" must not look like "per"
+            if (!rowsIntent && !p.filters.isEmpty() && !has(qNoCols, " (by|per|each|across|total|sum|average|avg|mean|count|how many|number of) ")
+                    && has(qn, " (show|list|display|find|get|give|which|what) (me )?(all )?(the |of the )?(rows|records|transactions|orders|entries|items|lines) "))
+                rowsIntent = true;
 
             // ---- measure + aggregation
             Column metric = null;
@@ -4347,7 +6053,8 @@ public class DataChat extends JFrame {
             }
 
             // ---- chart type
-            if (has(qn, " (pie|donut|doughnut|share|shares|proportion|proportions|percentage|percentages|composition) ")) p.chart = "pie";
+            if (has(qn, " (stacked|stack|stacks|stacking) ")) p.chart = has(qn, " (100|percent|percentage|percentages|proportion|proportions|relative|normali[sz]ed|share|shares|mix) ") ? "stacked100" : "stacked";
+            else if (has(qn, " (pie|donut|doughnut|share|shares|proportion|proportions|percentage|percentages|composition) ")) p.chart = "pie";
             else if (has(qn, " (line|lines|trend|trends|over time) ")) p.chart = "line";
             else if (has(qn, " (bar|bars|column|columns|histogram) ")) p.chart = "bar";
 
@@ -4545,7 +6252,7 @@ public class DataChat extends JFrame {
             p.x = x == null ? null : x.name;
             p.series = series == null ? null : series.name;
             if (x != null && series != null && series.type == ColType.DATE) p.bucket = bucket;
-            if (x == null && (p.chart.equals("pie") || p.chart.equals("bar") || p.chart.equals("line"))) {
+            if (x == null && (p.chart.equals("pie") || p.chart.equals("bar") || p.chart.equals("line") || p.chart.startsWith("stacked"))) {
                 // user wants a chart but named no grouping: pick the most useful default
                 if (!cats.isEmpty()) {
                     p.x = cats.get(0).name;
@@ -4660,7 +6367,7 @@ public class DataChat extends JFrame {
                  "filters": [ {"column": "...", "op": "=" | "!=" | ">" | "<" | ">=" | "<=" | "contains" | "in" | "not in", "value": "..." or ["a","b"] for in / not in} ],
                  "sort": "asc" | "desc" | "none",
                  "limit": integer or null,
-                 "chart": "bar" | "line" | "pie" | "scatter" | "none",
+                 "chart": "bar" | "line" | "pie" | "stacked" | "stacked100" | "scatter" | "none",
                  "from": period label or null, "to": period label or null, "direction": "drop" | "rise",
                  "time": date column name (compare only; defaults to the first date column),
                  "message": optional one-sentence note about an assumption you made
@@ -4720,6 +6427,25 @@ public class DataChat extends JFrame {
             int a = text.indexOf('{'), b = text.lastIndexOf('}');
             if (a < 0 || b < a) throw new IOException("the model did not return a plan");
             return Plan.fromJson((Map<String, Object>) Json.parse(text.substring(a, b + 1)));
+        }
+
+        /** Turns a plain-English request into {column name, formula}. The formula is parsed by Calc, never executed as code. */
+        @SuppressWarnings("unchecked")
+        String[] formula(String request, DataTable t) throws Exception {
+            String sys = """
+                    You turn a request for a calculated column into a formula over the table's numeric columns.
+                    Reply with JSON only: {"name": "short column name", "formula": "..."} or {"error": "why it can't be done"}.
+                    Formula rules: use numeric column names exactly as written in the schema; operators + - * / ^ and parentheses; percentage literals like 10%; comparisons < > <= >= = !=;
+                    functions abs, round(x, decimals), floor, ceil, sqrt, ln, log, exp, min(a, b), max(a, b), pow(a, b), if(condition, valueIfTrue, valueIfFalse).
+                    "X as a percent of Y" is X / Y * 100. Use only columns that exist and are NUMBER. Never invent columns.""";
+            String text = complete(sys, t.describe(false) + "\nRequest: " + request, 300);
+            int a = text.indexOf('{'), b = text.lastIndexOf('}');
+            if (a < 0 || b < a) throw new IOException("the model did not return a formula");
+            Map<String, Object> m = (Map<String, Object>) Json.parse(text.substring(a, b + 1));
+            if (m.get("error") != null) throw new IOException(String.valueOf(m.get("error")));
+            Object f = m.get("formula"), n = m.get("name");
+            if (f == null || n == null) throw new IOException("the model did not return a formula");
+            return new String[]{Calc.cleanName(String.valueOf(n)), String.valueOf(f)};
         }
 
         String narrate(String question, Plan plan, Result r) throws Exception {
@@ -5049,7 +6775,19 @@ public class DataChat extends JFrame {
             return nf * Math.pow(10, e);
         }
 
+        private boolean stackedType() { return d.type == ChartType.STACK || d.type == ChartType.STACK100; }
+
         private double[] range(boolean pad) {
+            if (stackedType()) {
+                if (d.type == ChartType.STACK100) return new double[]{0, 100};
+                double mx = 0;
+                for (int i = 0; i < d.labels.size(); i++) {
+                    double t = 0;
+                    for (double[] row : d.values) if (!Double.isNaN(row[i]) && row[i] > 0) t += row[i];
+                    mx = Math.max(mx, t);
+                }
+                return new double[]{0, mx <= 0 ? 1 : mx * 1.06};
+            }
             double lo = 0, hi = 0;
             for (double[] row : d.values) for (double v : row) if (!Double.isNaN(v)) { lo = Math.min(lo, v); hi = Math.max(hi, v); }
             if (d.bandLo != null) for (double v : d.bandLo) if (!Double.isNaN(v)) lo = Math.min(lo, v);
@@ -5134,7 +6872,7 @@ public class DataChat extends JFrame {
             final double hi = hi0 <= lo ? lo + step : hi0;
             int ticks = (int) Math.round((hi - lo) / step);
             int tickW = 0;
-            for (int k = 0; k <= ticks; k++) tickW = Math.max(tickW, fm.stringWidth(Fmt.compact(lo + k * step)));
+            for (int k = 0; k <= ticks; k++) tickW = Math.max(tickW, fm.stringWidth(Fmt.compact(lo + k * step) + (d.type == ChartType.STACK100 ? "%" : "")));
             int left = tickW + 18, right = 16;
             int plotW = w - left - right;
             if (plotW < 40) return;
@@ -5164,7 +6902,7 @@ public class DataChat extends JFrame {
                 g.setColor(GRID);
                 g.drawLine(left, y, left + plotW, y);
                 g.setColor(AXIS);
-                String lab = Fmt.compact(v);
+                String lab = Fmt.compact(v) + (d.type == ChartType.STACK100 ? "%" : "");
                 g.drawString(lab, left - 6 - fm.stringWidth(lab), y + fm.getAscent() / 2 - 1);
             }
             int y0 = (int) Math.round(yOf.applyAsDouble(0));
@@ -5211,6 +6949,34 @@ public class DataChat extends JFrame {
                         double x = left + (i + 0.5) * slot, y = yOf.applyAsDouble(vs[i]);
                         if (n <= 60) g.fill(new Ellipse2D.Double(x - 3, y - 3, 6, 6));
                         hits.add(new Hit(new Ellipse2D.Double(x - 7, y - 7, 14, 14), tip(i, s, vs[i]), i, s));
+                    }
+                }
+            } else if (stackedType()) {
+                boolean pct = d.type == ChartType.STACK100;
+                double barW = Math.min(slot * 0.72, 90);
+                for (int i = 0; i < n; i++) {
+                    double tot = 0;
+                    for (double[] row : d.values) if (!Double.isNaN(row[i]) && row[i] > 0) tot += row[i];
+                    if (tot <= 0) continue;
+                    double cum = 0, x = left + i * slot + (slot - barW) / 2;
+                    for (int s = 0; s < ns; s++) {
+                        double v = d.values.get(s)[i];
+                        if (Double.isNaN(v) || v <= 0) continue;
+                        double a = cum, b = cum + v;
+                        cum = b;
+                        double ya = yOf.applyAsDouble(pct ? a / tot * 100 : a), yb = yOf.applyAsDouble(pct ? b / tot * 100 : b);
+                        Rectangle2D.Double rr = new Rectangle2D.Double(x, yb, barW, Math.max(1, ya - yb));
+                        g.setColor(color(s));
+                        g.fill(rr);
+                        g.setColor(getBackground());
+                        g.setStroke(new BasicStroke(1f));
+                        g.draw(rr);
+                        hits.add(new Hit(rr, d.labels.get(i) + "  [" + d.series.get(s) + "]: " + Fmt.full(v) + " (" + String.format(Locale.US, "%.1f%%", 100 * v / tot) + " of " + Fmt.full(tot) + ")", i, s));
+                    }
+                    if (!pct && barW >= 26) {
+                        g.setColor(INK);
+                        String tl = Fmt.compact(tot);
+                        g.drawString(tl, (int) (x + barW / 2 - fm.stringWidth(tl) / 2.0), (int) yOf.applyAsDouble(tot) - 4);
                     }
                 }
             } else {
@@ -5511,12 +7277,13 @@ public class DataChat extends JFrame {
             if (demo) {
                 return List.of("What's driving the drop in March?",
                         "Chart the financial transactions by region",
-                        "Monthly revenue by category",
+                        "Monthly revenue by category, stacked",
                         "Share of revenue by channel as a pie chart",
                         "Scatter plot of amount vs units",
                         "Any unusual transactions?",
                         "Compare Q1 with Q2 by region",
-                        "Forecast revenue for the next 3 months");
+                        "Forecast revenue for the next 3 months",
+                        "Add column Price per unit = Amount / Units");
             }
             List<String> out = new ArrayList<>();
             out.add("Describe this data");

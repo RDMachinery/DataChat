@@ -1,8 +1,3 @@
-![splash shot](splash.jpeg)
-
-![Screenshot](screenshot.jpeg)
-![Screenshot2](screenshot2.jpeg)
-
 # DataChat
 
 **Ask your CSV or Excel data questions in plain English and get an answer plus a chart.**
@@ -28,9 +23,12 @@ DataChat is a single-file Java Swing desktop app with **no external dependencies
 - [Click a chart to drill down](#click-a-chart-to-drill-down)
 - [Correlation and scatter plots](#correlation-and-scatter-plots)
 - [Unusual values and outliers](#unusual-values-and-outliers)
+- [Cleaning data](#cleaning-data)
+- [Calculated columns](#calculated-columns)
+- [Joining two files or sheets](#joining-two-files-or-sheets)
 - [Comparing two periods](#comparing-two-periods)
 - [Forecasting](#forecasting)
-- [Switching chart type](#switching-chart-type)
+- [Switching chart type and stacked charts](#switching-chart-type-and-stacked-charts)
 - [Saving charts as images](#saving-charts-as-images)
 - [Dark mode](#dark-mode)
 - [PDF report](#pdf-report)
@@ -205,6 +203,87 @@ Follow-ups work: after *"any unusual transactions?"*, try *"only North"*, *"now 
 
 Things to keep in mind: unusual does not mean wrong, it means different from the rest, so check each one. The cut-off is fixed at 3.5. Outliers are judged one column at a time, so a combination that is odd only when two columns are read together (a huge discount on a tiny order, say) won't be found.
 
+### Cleaning data
+
+Real files are messy: dates read the wrong way round, numbers stored as text because one cell says `N/A`, duplicate rows, columns you don't need. **Clean data...** (top toolbar, or type *"clean the data"* or *"remove duplicates"*) fixes these in one place.
+
+- **Columns:** untick **Keep** to remove a column, edit **Column name** to rename it, and use **Read as** when the detected type is wrong: *Number (1,234.56)*, *Number (1.234,56)*, *Date (day first)*, *Date (month first)* or *Text*. The *Detected as* and *Example values* columns show what DataChat made of each one.
+- **Treat these values as empty:** a list (by default `N/A, NA, #N/A, null, NaN, -, --, ?`) of values that mean "nothing here". A column that was read as text only because of a few `N/A` cells becomes a proper number column. Edit the list to suit your file; matching ignores capitals.
+- **Remove duplicate rows:** drops rows that are identical to an earlier row in every kept column, keeping the first copy.
+- A live line under the options says how many cells would become empty and how many rows are duplicates, before you apply anything.
+
+Click **Apply cleaning** and the result becomes the table you ask questions about, named after the original with *(cleaned)* added. The chat summarises exactly what changed: rows and columns before and after, cells treated as empty, duplicates removed, columns renamed or removed, and any column whose type changed. If a forced type can't read some values (for example `13/04/2026` read month-first), those values are left blank and the summary says how many.
+
+The original file is never modified. Load it again to start over.
+
+Date order matters: `03/04/2026` is 3 April day-first and 4 March month-first. DataChat assumes day-first when a column is ambiguous, so use **Date (month first)** for US-style files.
+
+### Calculated columns
+
+Add a column computed from other columns, then use it in any question like a normal column. Type it in the chat:
+
+- `add column Margin = Revenue - Cost`
+- `add column Price per unit = Amount / Units`
+- `add column Margin % = (Revenue - Cost) / Revenue * 100`
+- `add column Discount share = Discount as a percent of Amount`
+- `create a column called Net as Revenue minus Cost`
+
+Or use the **Add a calculated column** section of **Clean data...**, which also shows an error message right there if the formula isn't right.
+
+What formulas can contain:
+
+| | |
+|---|---|
+| Numeric columns | By name, as written. Use `[Column name]` for awkward names, such as `[Discount (%)]` |
+| Arithmetic | `+ - * / ^` and brackets |
+| In words | `minus`, `plus`, `times`, `divided by`, `per`, `over`, `as a percent of`, `10% of` |
+| Percentages | `10%` means 0.1 |
+| Comparisons | `> < >= <= = !=` (give 1 for true, 0 for false) |
+| Functions | `abs`, `round(x, decimals)`, `floor`, `ceil`, `sqrt`, `ln`, `log`, `exp`, `min(a, b)`, `max(a, b)`, `pow(a, b)`, `if(condition, a, b)` |
+
+For example, `if(Amount > 500, 1, 0)` flags big orders, and `round(Cost / Units, 2)` rounds a unit cost.
+
+Then ask as usual: *"Average Margin by Product"*, *"Total Margin by region"*, *"Show rows where Margin is below 0"*.
+
+Notes:
+
+- Only **numeric** columns can be used. A text or date column gives a clear error. Fix its type first in **Clean data...**.
+- A row is left blank when an input is blank or the formula divides by zero, and the message tells you how many rows.
+- A formula must use at least one column, and the name must be new. To redo one, remove the column in **Clean data...** and add it again.
+- With a Claude API key, a request the offline parser can't read (*"add a column for the profit after tax at 20%"*) is sent to Claude, which only sees the column names and types and returns a formula. DataChat checks that formula with the same parser; nothing the model returns is ever run as code.
+- Calculated columns live in the current table and are included if you [join](#joining-two-files-or-sheets) it or clean it. They aren't written back to your file; export a result as CSV to keep the numbers.
+
+### Joining two files or sheets
+
+Real questions often need data from two places: orders in one file and customer details in another, sales in one Excel sheet and targets in a second. **Join tables...** (top toolbar) combines two tables on a shared key column, and the result becomes the table you ask questions about.
+
+1. Click **Join tables...** (or type *"join two files"* in the chat). Every file or sheet you have loaded in this session is already in the lists.
+2. Click **Add file or sheet...** to bring in another CSV or Excel file. For a workbook with several sheets, select the ones you want (Ctrl-click for more than one). Hidden sheets are left out.
+3. Choose the **left** and **right** tables. DataChat suggests the key columns by comparing names and values; change them if it guessed wrong. You can match on up to three columns together (for example region **and** month).
+4. Read the **Match check**, which updates as you choose: what share of each table finds a partner, how many keys are blank, and examples of values that didn't match.
+5. Choose which rows to keep, then click **Join**.
+
+| Choice | Result |
+|---|---|
+| Keep every row of the left table *(default)* | Nothing from your main table is lost. Rows with no partner get blanks for the right table's columns |
+| Keep only rows that match in both | A row appears only if both tables have the key |
+| Keep all rows from both tables | Everything is kept, matched or not |
+
+What you get:
+
+- **A new table**, named after its parts (for example `orders + customers`), shown on **Your data**. Ask questions as usual: *"Total amount by region"* now works with columns from both files. The chat starts fresh for the new table, and the join table is itself kept in the lists so you can join it with a third file.
+- **The key column from the right table isn't repeated.** The left table's key column holds the values. Other columns with the same name in both tables get the right table's name added, such as `Amount (targets)`.
+- **A plain-English summary** of what happened: rows in and out, how many matched, how many didn't, and any warning.
+- **Unmatched rows stay visible.** In text columns they read `(no match)`, so a chart *by manager* shows them as their own bar instead of quietly leaving them out. Number and date columns are left blank.
+
+Things worth knowing:
+
+- **Repeated rows inflate totals.** If one row of the left table matches several rows of the right (for example a customer with two addresses), the left row is repeated once per match and a *sum* of the left table's numbers counts it more than once. DataChat warns you in the Match check and again after joining. Use a key that is unique in the right table, add a second key column, or summarise the right table first.
+- **Matching is forgiving but not fuzzy.** Capitals and extra spaces are ignored, `1`, `1.0` and `001` count as the same number, and dates match across formats (`2026-01-05` and `05/01/2026`). Anything else must be identical, so `C-001` and `C001` do not match. If nothing matches, the message shows example values from each side.
+- Blank keys never match anything, in either table.
+- A join can produce at most 1,000,000 rows. This only matters when neither table's key is unique, in which case every row matches many others and the result explodes.
+- Joined data is analysed exactly like a loaded file, including auto-insights, drill-down, forecasting and PDF reports. Loading a new file replaces what you are looking at but keeps earlier tables in the Join lists (the last 10).
+
 ### Comparing two periods
 
 Ask how one period differs from another and DataChat puts the two side by side, with the change broken down by segment.
@@ -235,15 +314,22 @@ Defaults when you don't say how far: 14 days, 8 weeks, 3 months, 2 quarters or 2
 
 Be realistic about it: a forecast carries past patterns forward. It cannot know about promotions, closures or one-off events, and with fewer than about 6 periods of history DataChat refuses rather than guess. With only a few months of data, treat the result as a rough guide.
 
-### Switching chart type
+### Switching chart type and stacked charts
 
-Above the chart, **Show as:** has four buttons: **Bars**, **Horizontal bars**, **Line** and **Pie**. Click one to redraw the current answer in that style without asking again. The button for the current style is highlighted.
+Above the chart, **Show as:** has six buttons: **Bars**, **Horizontal bars**, **Line**, **Pie**, **Stacked** and **100% stacked**. Click one to redraw the current answer in that style without asking again. The button for the current style is highlighted.
 
 Buttons that wouldn't make sense are greyed out:
 
 - **Pie** needs a single series with 2 to 12 positive values.
 - **Line** needs at least 2 points (it suits time or ordered data best).
-- Charts that have a fixed meaning, such as scatter plots and forecasts, can't be switched, and change charts (red and green) only switch between the two bar styles.
+- **Stacked** and **100% stacked** need two or more series that are *parts of a whole*: totals or counts, with no negative values. Averages, minimums, maximums and medians can't be stacked, because stacking them would add up numbers that don't add up.
+- Charts that have a fixed meaning, such as scatter plots, forecasts and comparisons, can't be switched, and change charts (red and green) only switch between the two bar styles.
+
+You can also ask for stacking directly: *"Revenue by month and category, stacked"*, *"Revenue by region and channel as 100% stacked bars"*, or, after any chart with two groupings, *"make it stacked"*. A stacked chart needs a second grouping; if you ask for one without it, you get an ordinary chart and a note saying why.
+
+- **Stacked** draws the segments on top of each other with the total above each bar, so you see both the overall level and the mix.
+- **100% stacked** draws every bar to the same height, so you compare the *mix* between bars, such as each region's share by channel.
+- Hover over a segment to see its value, its share of the bar and the bar's total. Click a segment to drill down, as with other charts.
 
 Saved PNGs, copied charts and the PDF report use whatever style is on screen. Asking a new question starts from the automatic choice again.
 
@@ -312,6 +398,8 @@ Type in the box at the bottom of the chat and press Enter (or click **Ask**). Sh
 | `How many transactions per month?` | Row counts over time |
 | `Revenue by weekday` | Totals for Mon to Sun |
 | `Show amount by region for Q2` | Date-filtered totals |
+| `Total amount where units > 5` | Numeric filter. Also `units over 5`, `units at most 3`, `discount above 10`, `units between 3 and 6`, `units = 5` |
+| `Show rows where units > 8` | The matching rows as a table (also `list the transactions with discount above 10`) |
 | `Top 5 largest transactions` | The five biggest rows, as a table |
 | `Scatter plot of amount vs units` | Scatter plot with fitted line, *r* and *n* |
 | `Is discount related to amount?` | Correlation statistics and a scatter plot |
@@ -319,10 +407,14 @@ Type in the box at the bottom of the chat and press Enter (or click **Ask**). Sh
 | `Now split that by channel` | A follow-up: refines the previous answer (see [Follow-up questions](#follow-up-questions)) |
 | `Any unusual transactions?` | Outlier scan across the numeric columns (see [Unusual values and outliers](#unusual-values-and-outliers)) |
 | `Which weeks look unusual?` | Line chart with the odd weeks shaded |
+| `Revenue by month and category, stacked` | Stacked bars with a total above each (see [Switching chart type and stacked charts](#switching-chart-type-and-stacked-charts)) |
+| `Add column Price per unit = Amount / Units` | Adds a calculated column (see [Calculated columns](#calculated-columns)) |
+| `Clean the data` | Opens the cleaning dialog (see [Cleaning data](#cleaning-data)) |
 | `Compare Q1 with Q2 by region` | Side-by-side totals, change and share of change per Region (see [Comparing two periods](#comparing-two-periods)) |
 | `Last 30 days vs the previous 30` | Same comparison for relative periods |
 | `Year over year` | Year so far against the same dates a year earlier |
 | `Forecast revenue for the next 3 months` | History, dashed forecast and a 95% band (see [Forecasting](#forecasting)) |
+| `Join two files` | Opens the join dialog (see [Joining two files or sheets](#joining-two-files-or-sheets)) |
 | `Describe this data` | Column-by-column overview |
 
 ---
@@ -399,7 +491,7 @@ Claude (or the offline planner) produces one JSON object. The engine executes it
 | `series` | Optional second grouping, drawn as separate colours (max 8 series) |
 | `filters` | `column`, `op` (`=`, `!=`, `>`, `<`, `>=`, `<=`, `contains`, `in`, `not in`) and `value`. Date filters accept partial ISO dates like `2026-03` |
 | `sort` / `limit` | Ordering and top-N. Categories default to descending by value; large category sets are capped at 20 |
-| `chart` | `bar`, `line`, `pie`, `scatter`, `none` (omitted means auto) |
+| `chart` | `bar`, `line`, `pie`, `stacked`, `stacked100`, `scatter`, `none` (omitted means auto). Stacked needs a `series` and a `sum` or `count` aggregation |
 | *(correlate)* | `x` is the numeric column for the x-axis, `metric` the numeric column for the y-axis (leave both `null` for a matrix, or set one to find its strongest partner), and `series` an optional text column to colour by |
 | `from` / `to` / `direction` | For `drivers`: the periods to compare (for example `2026-02`, `2026-03`) and whether to look for a `drop` or a `rise` |
 | `time` | For `compare`: how to read the periods. Labels such as `2026-03` (month), `2026-Q1`, `2026` (year), `2026-W09` (week), a day, or a range `2026-01-01..2026-01-31`. Relative periods are resolved against the latest date in the data |
@@ -483,7 +575,7 @@ The loaded data behaves exactly like a CSV from then on, so everything else in t
 ## Limitations
 
 - The data is held in memory, so very large files (millions of rows) will need a bigger heap (`java -Xmx4g ...`).
-- Only one table at a time, and one Excel sheet at a time. There are no joins across files or sheets.
+- Questions are answered against one table at a time. To use two files or sheets together, [join them](#joining-two-files-or-sheets) first. Joins are by key columns and are inner, left or full; there is no fuzzy matching, and a join can't be undone in place (load the original or join again).
 - Excel: `.xls` and password-protected files aren't supported, formulas use their last saved values, and merged cells are read as a single value.
 - Comparisons need dates in the data and two periods that can be told apart. The breakdown is one text column at a time (plus the automatic pick), and numeric columns aren't used as dimensions.
 - Forecasts are a trend plus a repeating pattern, nothing more. They need at least 6 periods of history, use seasonality only with enough cycles (see [Forecasting](#forecasting)), and know nothing about events outside the data. The band is approximate and assumes steady noise.
@@ -492,7 +584,10 @@ The loaded data behaves exactly like a CSV from then on, so everything else in t
 - Copying a chart needs a desktop that supports image clipboards. Saving a PNG always works.
 - Day-first dates are assumed when a column is ambiguous (for example `03/04/2026` with no day above 12).
 - Number columns whose every value is ambiguous (only `1,234`-style or `1.200`-style values, in a file with no other evidence) are read as US numbers.
-- Stacked charts and multiple y-axes aren't supported. Multi-series data is drawn as grouped bars or multiple lines.
+- Stacked charts are bars only (no stacked areas or horizontal stacks), need totals or counts without negatives, and multiple y-axes aren't supported. Other multi-series data is drawn as grouped bars or multiple lines.
+- Numeric filters in offline mode read one condition per column (for example `units > 5` or `units between 3 and 6`) and match the column name as written (the part before any brackets works for names like `Discount (%)`). More complex conditions, such as OR across columns, work best with Claude.
+- Calculated columns are numeric only, have no date arithmetic and no conditions across rows (no running totals or rank). Each is computed once when you add it.
+- Cleaning works on the whole table at once and replaces it with a new one (and a fresh chat); it doesn't edit individual cells. Duplicates are exact matches only.
 - Driver analysis considers text columns (up to 40 distinct values each) and two-way combinations of columns with up to 12 values. Numeric columns aren't used as dimensions.
 - Offline follow-ups handle the common refinements (split, filter, change aggregation, chart type, top N, colour by); more open-ended follow-ups such as *"why is that?"* work best with Claude.
 - Correlation is linear (Pearson), with Spearman as a cross-check. It needs at least two numeric columns and doesn't test significance beyond a rule-of-thumb noise warning.
@@ -523,6 +618,14 @@ The loaded data behaves exactly like a CSV from then on, so everything else in t
 | Forecast says there isn't enough history | It needs at least 6 periods. Ask for a finer period (*"by week"*) or load more data |
 | Forecast shows a flat line | The trend wasn't clear enough to separate from noise, so it holds the recent level. This is deliberate |
 | Some **Show as:** buttons are greyed out | That style doesn't suit this chart (for example Pie with more than 12 slices, negatives or several series) |
+| `add column ...` says it doesn't know a word | The formula uses a name that isn't a numeric column. The message lists the numeric columns. Use `[Column name]` for names with spaces or brackets |
+| A calculated column is mostly blank | Its inputs are blank in those rows, or the formula divides by zero. Clean the inputs first (for example treat `N/A` as empty) |
+| A number column is read as text | One or a few cells like `N/A` or `-` spoil it. Open **Clean data...** and treat them as empty, or set **Read as** to a number |
+| Dates come out as the wrong month | The file is month-first. In **Clean data...** set **Read as** to *Date (month first)* |
+| **Stacked** is greyed out | The chart has one series, uses averages or other non-additive measures, or has negative values. Ask for two groupings, e.g. *"revenue by month and category"* |
+| Join says *No rows match* | The key columns hold values written differently (`C-001` vs `C001`) or you picked the wrong columns. The message shows examples from each side. Fix the source data or choose other keys |
+| Join warns that rows are repeated | The right table's key has duplicates. Totals of the left table's numbers would count rows more than once. Use a unique key or add another key column |
+| The Join lists are missing a file | Only tables loaded in this session (the last 10) appear. Use **Add file or sheet...** in the dialog |
 | **Save chart as PNG...** and **Copy chart** are greyed out | The current answer has no chart (for example a table of rows). Ask a question that produces a chart |
 | `?` characters in the PDF | The text contains characters outside Western European encodings, which the built-in PDF fonts can't show |
 
@@ -536,6 +639,9 @@ Everything lives in `DataChat.java`, organised as nested classes:
 |---|---|
 | `DataChat` | Swing UI: toolbar, chat transcript, tabs, drag and drop, background `SwingWorker` tasks |
 | `DataTable`, `Column` | In-memory table, CSV parsing, type detection (`NUMBER` / `DATE` / `TEXT`), schema description for the model |
+| `Calc` | Calculated columns: tokenizer, a small recursive-descent parser and per-row evaluation (no code execution), plus `parseDefinition` for finding "add column ..." in a sentence |
+| `Clean` | Cleaning: type overrides (`Column.forceNumber`, `forceDate`), "treat as empty" values, duplicates, renames, dropped columns, and the change summary |
+| `Join` | Joins: key normalisation, `suggest` (picks the likely key pair), `check` (match quality without building anything), `join` (inner, left or full) and the plain-English `notes`. The dialog and file/sheet adder are `DataChat.joinDialog` and `addTablesFromFile` |
 | `Xlsx` | Dependency-free Excel reader: unzips the workbook, streams the XML, resolves shared strings, date and percent styles, and tidies the grid into rows for `DataTable` |
 | `Plan`, `Filter` | The analysis plan, with JSON conversion |
 | `Engine` | Executes a plan: filtering, grouping, aggregation, driver analysis, correlation, anomaly detection (`anomalies`, `periodAnomalies`, `robustScores`), period comparison (`compare`, `spanOf`), forecasting (`forecast`, `fitModel`, `chooseModel`), fact generation |
@@ -546,7 +652,7 @@ Everything lives in `DataChat.java`, organised as nested classes:
 | `Json` | Minimal JSON reader and writer (no libraries) |
 | `DarkTheme` | The dark colour theme (a small Metal theme); `DataChat.setDark` switches look and feel, recolours the chat transcript and redraws the charts |
 | `ChartExport` | Save a chart as PNG (rendered at 2x) or copy it to the clipboard; used by the toolbar button and the chart's right-click menu |
-| `ChartPanel` | Java2D chart rendering: bar, horizontal bar, line, pie, scatter, forecast bands and dashed series, with tooltips and click handling. `DataChat.canShowAs` decides which **Show as:** buttons apply. Also used to render charts into the PDF |
+| `ChartPanel` | Java2D chart rendering: bar, horizontal bar, line, pie, stacked and 100% stacked, scatter, forecast bands and dashed series, with tooltips and click handling. `DataChat.canShowAs` decides which **Show as:** buttons apply. Also used to render charts into the PDF |
 | `Insights`, `Insight` | The on-load scan: biggest drop and rise, over-indexing segments, outliers, trend and missing data. Each insight carries a ready-made `Plan` |
 | `Pdf`, `ReportBuilder` | Minimal PDF 1.4 writer (text, rules, JPEG images, Flate-compressed pages) and the report layout |
 | `DemoData` | Synthetic transactions generator and example questions |
@@ -559,6 +665,9 @@ Everything lives in `DataChat.java`, organised as nested classes:
 - **New follow-up phrase:** add the cue to `LocalPlanner.STRONG` (or `WEAK` for very short questions) and handle what it changes in `LocalPlanner.followUp`.
 - **New drill-down behaviour:** edit `Drill.plan`. Charts carry what a click means in `ChartData` (`basePlan`, `labelFilters`, `seriesFilters`, `periodX`).
 - **Dark palette:** edit the colours in `DarkTheme` (whole UI), `ChartPanel.setDark` (charts) and `DataChat.renderChat` (chat text colours).
+- **New formula function:** add the name to `Calc.FUNCS` and a case in `Calc.Parser.func`.
+- **Default empty values for cleaning:** edit `Clean.DEFAULT_BLANKS`.
+- **Join limits and matching:** `Join.MAX_OUT` caps result rows, `Join.norm` defines what counts as the same key value, and `Join.suggest` holds the scoring for suggested keys.
 - **Forecast seasons and defaults:** edit `Engine.seasonLength` (minimum history per season) and `Engine.defaultHorizon`. The minimum history is the `6` in `Engine.forecast`.
 - **Another switchable chart type:** add it to `SWITCH_TYPES` and a rule in `DataChat.canShowAs`.
 - **Anomaly sensitivity:** change `Engine.ANOMALY_Z` (default 3.5; lower flags more) or `Engine.MIN_GROUP` / `MIN_PERIODS`.
