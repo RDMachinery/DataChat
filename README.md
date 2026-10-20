@@ -1,5 +1,3 @@
-![Screenshot](screenshot.jpeg)
-
 # DataChat
 
 **Ask your CSV or Excel data questions in plain English and get an answer plus a chart.**
@@ -25,6 +23,9 @@ DataChat is a single-file Java Swing desktop app with **no external dependencies
 - [Click a chart to drill down](#click-a-chart-to-drill-down)
 - [Correlation and scatter plots](#correlation-and-scatter-plots)
 - [Unusual values and outliers](#unusual-values-and-outliers)
+- [Comparing two periods](#comparing-two-periods)
+- [Forecasting](#forecasting)
+- [Switching chart type](#switching-chart-type)
 - [Saving charts as images](#saving-charts-as-images)
 - [Dark mode](#dark-mode)
 - [PDF report](#pdf-report)
@@ -199,6 +200,48 @@ Follow-ups work: after *"any unusual transactions?"*, try *"only North"*, *"now 
 
 Things to keep in mind: unusual does not mean wrong, it means different from the rest, so check each one. The cut-off is fixed at 3.5. Outliers are judged one column at a time, so a combination that is odd only when two columns are read together (a huge discount on a tiny order, say) won't be found.
 
+### Comparing two periods
+
+Ask how one period differs from another and DataChat puts the two side by side, with the change broken down by segment.
+
+- Name the periods: *"Compare Q1 with Q2 by region"*, *"February vs March"*, *"2025 versus 2026"*.
+- Or use relative ones: *"last 30 days vs the previous 30"*, *"this month vs last month"*, *"month over month"*, *"year over year"*. Relative periods are measured from the **latest date in your data**, not today's date, so an old export still gives sensible answers. *Year over year* compares the year so far with the same dates a year earlier.
+- Add *"by region"* (or any text column) to choose the breakdown. If you don't, DataChat picks the column with 2 to 12 values where the two periods differ most.
+
+You get a table with both periods, the change, the change in percent and each segment's share of the overall change, plus two charts: grouped bars for the two periods and a red and green chart of the change per segment. The text names the biggest contributor and the biggest counter-mover, and warns when the periods have different lengths or the data only partly covers one of them.
+
+This describes **what** changed. For **why**, ask *"what's driving the drop in March?"*, which runs the full [driver analysis](#driver-analysis-why-did-it-drop). Words such as *why*, *driving* or *cause* send the question there instead.
+
+Follow-ups work too: after a comparison, try *"by channel"*, *"just units"* or *"average instead"*.
+
+### Forecasting
+
+Ask for a projection (*"forecast revenue for the next 3 months"*, *"what will sales look like next quarter?"*, *"predict units for the next 8 weeks"*) and DataChat extends the trend, drawing the history in blue, the forecast as a dashed line and the likely range as a shaded band.
+
+How it works, in plain terms:
+
+- It builds a complete calendar of periods (days, weeks, months, quarters or years, chosen from your data), filling any gaps, and drops a half-covered first or last period so it doesn't read as a fake dip.
+- It fits a straight-line trend plus a repeating pattern (day of week, week of year, month of year or quarter) **only when there is enough history**: at least 14 days, 104 weeks, 24 months or 8 quarters. If the trend isn't statistically distinguishable from noise, it projects the recent level instead and says so.
+- The band is an approximate 95% range that widens the further ahead it looks.
+- It checks itself by hiding the most recent periods, forecasting them, and comparing against a naive "same as last period" guess. The accuracy line in the answer reports this when there is enough history.
+- The table shows, per period, the forecast, the low and high ends, and the difference from the recent average.
+
+Defaults when you don't say how far: 14 days, 8 weeks, 3 months, 2 quarters or 2 years. The horizon is capped at half the history (and 60 periods).
+
+Be realistic about it: a forecast carries past patterns forward. It cannot know about promotions, closures or one-off events, and with fewer than about 6 periods of history DataChat refuses rather than guess. With only a few months of data, treat the result as a rough guide.
+
+### Switching chart type
+
+Above the chart, **Show as:** has four buttons: **Bars**, **Horizontal bars**, **Line** and **Pie**. Click one to redraw the current answer in that style without asking again. The button for the current style is highlighted.
+
+Buttons that wouldn't make sense are greyed out:
+
+- **Pie** needs a single series with 2 to 12 positive values.
+- **Line** needs at least 2 points (it suits time or ordered data best).
+- Charts that have a fixed meaning, such as scatter plots and forecasts, can't be switched, and change charts (red and green) only switch between the two bar styles.
+
+Saved PNGs, copied charts and the PDF report use whatever style is on screen. Asking a new question starts from the automatic choice again.
+
 ### Saving charts as images
 
 On the **Chart** tab, above the chart:
@@ -258,7 +301,7 @@ Type in the box at the bottom of the chat and press Enter (or click **Ask**). Sh
 | `Monthly revenue by category` | Multi-line chart, one line per Category |
 | `What's driving the drop in March?` | Trend chart plus a ranked breakdown of which segments caused the change |
 | `Why did revenue rise in May?` | Same analysis for an increase |
-| `Compare February and March` | Driver analysis between two named periods |
+| `Compare February and March` | Side-by-side comparison of the two periods, with the change by segment (ask *"why did it drop from February to March?"* for the full driver analysis) |
 | `Share of revenue by channel as a pie chart` | Pie chart with percentages |
 | `Average amount by category, excluding refunded` | Filtered average per Category |
 | `How many transactions per month?` | Row counts over time |
@@ -271,6 +314,10 @@ Type in the box at the bottom of the chat and press Enter (or click **Ask**). Sh
 | `Now split that by channel` | A follow-up: refines the previous answer (see [Follow-up questions](#follow-up-questions)) |
 | `Any unusual transactions?` | Outlier scan across the numeric columns (see [Unusual values and outliers](#unusual-values-and-outliers)) |
 | `Which weeks look unusual?` | Line chart with the odd weeks shaded |
+| `Compare Q1 with Q2 by region` | Side-by-side totals, change and share of change per Region (see [Comparing two periods](#comparing-two-periods)) |
+| `Last 30 days vs the previous 30` | Same comparison for relative periods |
+| `Year over year` | Year so far against the same dates a year earlier |
+| `Forecast revenue for the next 3 months` | History, dashed forecast and a 95% band (see [Forecasting](#forecasting)) |
 | `Describe this data` | Column-by-column overview |
 
 ---
@@ -339,7 +386,7 @@ Claude (or the offline planner) produces one JSON object. The engine executes it
 
 | Field | Meaning |
 |---|---|
-| `intent` | `aggregate` (group + chart), `drivers` (explain a change), `rows` (list individual rows), `describe` (column overview), `correlate` (relationship between numeric columns), `anomalies` (unusual rows or periods: `metric` is the column to scan or `null` for all, `series` a group to compare within, `x` + `bucket` for time periods) |
+| `intent` | `aggregate` (group + chart), `drivers` (explain a change), `rows` (list individual rows), `describe` (column overview), `correlate` (relationship between numeric columns), `anomalies` (unusual rows or periods: `metric` is the column to scan or `null` for all, `series` a group to compare within, `x` + `bucket` for time periods), `compare` (two periods side by side: `from`, `to`, optional `x` as the breakdown column), `forecast` (`x` is the date column, `bucket` the period size, `limit` how many periods ahead) |
 | `metric` | Numeric column to measure, or `null` to count rows |
 | `agg` | `sum`, `avg`, `count`, `min`, `max`, `median` |
 | `x` | Column for the x-axis or grouping (`null` = one overall number) |
@@ -350,6 +397,7 @@ Claude (or the offline planner) produces one JSON object. The engine executes it
 | `chart` | `bar`, `line`, `pie`, `scatter`, `none` (omitted means auto) |
 | *(correlate)* | `x` is the numeric column for the x-axis, `metric` the numeric column for the y-axis (leave both `null` for a matrix, or set one to find its strongest partner), and `series` an optional text column to colour by |
 | `from` / `to` / `direction` | For `drivers`: the periods to compare (for example `2026-02`, `2026-03`) and whether to look for a `drop` or a `rise` |
+| `time` | For `compare`: how to read the periods. Labels such as `2026-03` (month), `2026-Q1`, `2026` (year), `2026-W09` (week), a day, or a range `2026-01-01..2026-01-31`. Relative periods are resolved against the latest date in the data |
 
 Chart choice when `chart` is auto: time on the x-axis gives a line (or bars for very few points), categories give bars (horizontal when there are many or the labels are long), and pie is used only when requested with up to 10 positive slices.
 
@@ -432,6 +480,9 @@ The loaded data behaves exactly like a CSV from then on, so everything else in t
 - The data is held in memory, so very large files (millions of rows) will need a bigger heap (`java -Xmx4g ...`).
 - Only one table at a time, and one Excel sheet at a time. There are no joins across files or sheets.
 - Excel: `.xls` and password-protected files aren't supported, formulas use their last saved values, and merged cells are read as a single value.
+- Comparisons need dates in the data and two periods that can be told apart. The breakdown is one text column at a time (plus the automatic pick), and numeric columns aren't used as dimensions.
+- Forecasts are a trend plus a repeating pattern, nothing more. They need at least 6 periods of history, use seasonality only with enough cycles (see [Forecasting](#forecasting)), and know nothing about events outside the data. The band is approximate and assumes steady noise.
+- Chart type switching applies to the chart on screen; scatter, forecast and change charts keep their own styles.
 - Outlier detection judges one column at a time with a fixed cut-off, and flags unusual values rather than proving errors. It needs at least 8 varied values (or 8 periods).
 - Copying a chart needs a desktop that supports image clipboards. Saving a PNG always works.
 - Day-first dates are assumed when a column is ambiguous (for example `03/04/2026` with no day above 12).
@@ -463,6 +514,10 @@ The loaded data behaves exactly like a CSV from then on, so everything else in t
 | Excel dates show as numbers | The column probably has no date format in the workbook. Apply a date format in Excel and save, or convert the column to text dates |
 | Formulas load as empty cells | The workbook was never calculated and saved by Excel. Open it in Excel, save it, and load it again |
 | Outlier check says a column was *not tested* | Most of its values are identical, or there are fewer than 8 of them, so there is no spread to measure |
+| Compare says it *couldn't work out the periods* | Name them (*"Q1 vs Q2"*, *"2026-02 vs 2026-03"*) or use a relative form (*"last 30 days vs previous 30"*). The data needs a date column |
+| Forecast says there isn't enough history | It needs at least 6 periods. Ask for a finer period (*"by week"*) or load more data |
+| Forecast shows a flat line | The trend wasn't clear enough to separate from noise, so it holds the recent level. This is deliberate |
+| Some **Show as:** buttons are greyed out | That style doesn't suit this chart (for example Pie with more than 12 slices, negatives or several series) |
 | **Save chart as PNG...** and **Copy chart** are greyed out | The current answer has no chart (for example a table of rows). Ask a question that produces a chart |
 | `?` characters in the PDF | The text contains characters outside Western European encodings, which the built-in PDF fonts can't show |
 
@@ -478,15 +533,15 @@ Everything lives in `DataChat.java`, organised as nested classes:
 | `DataTable`, `Column` | In-memory table, CSV parsing, type detection (`NUMBER` / `DATE` / `TEXT`), schema description for the model |
 | `Xlsx` | Dependency-free Excel reader: unzips the workbook, streams the XML, resolves shared strings, date and percent styles, and tidies the grid into rows for `DataTable` |
 | `Plan`, `Filter` | The analysis plan, with JSON conversion |
-| `Engine` | Executes a plan: filtering, grouping, aggregation, driver analysis, correlation, anomaly detection (`anomalies`, `periodAnomalies`, `robustScores`), fact generation |
+| `Engine` | Executes a plan: filtering, grouping, aggregation, driver analysis, correlation, anomaly detection (`anomalies`, `periodAnomalies`, `robustScores`), period comparison (`compare`, `spanOf`), forecasting (`forecast`, `fitModel`, `chooseModel`), fact generation |
 | `Result`, `ChartData` | Output of the engine: table rows, chart specs, plain-English facts |
-| `LocalPlanner` | Offline natural-language to plan translation (including follow-ups that modify the previous plan, and correlation detection), and offline answer text |
+| `LocalPlanner` | Offline natural-language to plan translation (including follow-ups that modify the previous plan, correlation detection, and `comparePeriods` for resolving period names), and offline answer text |
 | `Drill` | Turns a click on a chart element into a follow-up `Plan` |
 | `Claude` | Anthropic Messages API client plus the planner and explainer system prompts |
 | `Json` | Minimal JSON reader and writer (no libraries) |
 | `DarkTheme` | The dark colour theme (a small Metal theme); `DataChat.setDark` switches look and feel, recolours the chat transcript and redraws the charts |
 | `ChartExport` | Save a chart as PNG (rendered at 2x) or copy it to the clipboard; used by the toolbar button and the chart's right-click menu |
-| `ChartPanel` | Java2D chart rendering: bar, horizontal bar, line, pie, scatter, with tooltips and click handling. Also used to render charts into the PDF |
+| `ChartPanel` | Java2D chart rendering: bar, horizontal bar, line, pie, scatter, forecast bands and dashed series, with tooltips and click handling. `DataChat.canShowAs` decides which **Show as:** buttons apply. Also used to render charts into the PDF |
 | `Insights`, `Insight` | The on-load scan: biggest drop and rise, over-indexing segments, outliers, trend and missing data. Each insight carries a ready-made `Plan` |
 | `Pdf`, `ReportBuilder` | Minimal PDF 1.4 writer (text, rules, JPEG images, Flate-compressed pages) and the report layout |
 | `DemoData` | Synthetic transactions generator and example questions |
@@ -499,6 +554,8 @@ Everything lives in `DataChat.java`, organised as nested classes:
 - **New follow-up phrase:** add the cue to `LocalPlanner.STRONG` (or `WEAK` for very short questions) and handle what it changes in `LocalPlanner.followUp`.
 - **New drill-down behaviour:** edit `Drill.plan`. Charts carry what a click means in `ChartData` (`basePlan`, `labelFilters`, `seriesFilters`, `periodX`).
 - **Dark palette:** edit the colours in `DarkTheme` (whole UI), `ChartPanel.setDark` (charts) and `DataChat.renderChat` (chat text colours).
+- **Forecast seasons and defaults:** edit `Engine.seasonLength` (minimum history per season) and `Engine.defaultHorizon`. The minimum history is the `6` in `Engine.forecast`.
+- **Another switchable chart type:** add it to `SWITCH_TYPES` and a rule in `DataChat.canShowAs`.
 - **Anomaly sensitivity:** change `Engine.ANOMALY_Z` (default 3.5; lower flags more) or `Engine.MIN_GROUP` / `MIN_PERIODS`.
 - **Another file format:** produce a `List<String[]>` (header first) and pass it to `DataTable.fromRecords`, as `Xlsx` does, then add the extension to `loadFile` and the file chooser filter.
 - **New insight:** add a method to `Insights` that builds an `Insight(headline, plan)` and call it from `Insights.generate`. The plan runs through the normal engine when the user clicks *explore*.

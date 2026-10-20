@@ -113,6 +113,10 @@ public class DataChat extends JFrame {
     private final JButton pdfBtn = new JButton("Export PDF report...");
     private final JButton chartBtn = new JButton("Save chart as PNG...");
     private final JCheckBox darkBox = new JCheckBox("Dark mode");
+    private static final ChartType[] SWITCH_TYPES = {ChartType.BAR, ChartType.HBAR, ChartType.LINE, ChartType.PIE};
+    private static final String[] SWITCH_NAMES = {"Bars", "Horizontal bars", "Line", "Pie"};
+    private final JToggleButton[] typeBtns = new JToggleButton[SWITCH_TYPES.length];
+    private final ButtonGroup typeGroup = new ButtonGroup();
     private boolean dark;
     private static String lightLaf;
     private final JButton copyBtn = new JButton("Copy chart");
@@ -201,9 +205,25 @@ public class DataChat extends JFrame {
         copyBtn.addActionListener(e -> {
             if (!shownCharts.isEmpty()) ChartExport.copy(this, ChartExport.combined(shownCharts));
         });
-        JPanel chartBar = new JPanel(new FlowLayout(FlowLayout.RIGHT, 6, 2));
-        chartBar.add(copyBtn);
-        chartBar.add(chartBtn);
+        JPanel typeBar = new JPanel(new FlowLayout(FlowLayout.LEFT, 4, 2));
+        typeBar.add(new JLabel("Show as:"));
+        for (int i = 0; i < SWITCH_TYPES.length; i++) {
+            final ChartType ty = SWITCH_TYPES[i];
+            JToggleButton tb = new JToggleButton(SWITCH_NAMES[i]);
+            tb.setFocusPainted(false);
+            tb.setEnabled(false);
+            tb.setToolTipText("Redraw the current chart as " + SWITCH_NAMES[i].toLowerCase(Locale.ROOT) + " (greyed out when the data doesn't suit that type)");
+            tb.addActionListener(e -> switchChartType(ty));
+            typeGroup.add(tb);
+            typeBar.add(tb);
+            typeBtns[i] = tb;
+        }
+        JPanel actionBar = new JPanel(new FlowLayout(FlowLayout.RIGHT, 6, 2));
+        actionBar.add(copyBtn);
+        actionBar.add(chartBtn);
+        JPanel chartBar = new JPanel(new BorderLayout());
+        chartBar.add(typeBar, BorderLayout.WEST);
+        chartBar.add(actionBar, BorderLayout.EAST);
         JPanel chartTab = new JPanel(new BorderLayout());
         chartTab.add(chartBar, BorderLayout.NORTH);
         chartHost.setBackground(Color.WHITE);
@@ -710,6 +730,50 @@ public class DataChat extends JFrame {
         }
         chartHost.revalidate();
         chartHost.repaint();
+        syncTypeButtons();
+    }
+
+    /** True if this chart's data can sensibly be drawn as the given type. */
+    static boolean canShowAs(ChartData cd, ChartType t) {
+        if (cd.fixedType || cd.type == ChartType.SCATTER || !cd.sx.isEmpty() || cd.fit != null) return false;
+        int nx = cd.labels.size(), ns = cd.values.size();
+        if (nx == 0 || ns == 0) return false;
+        if (cd.signColors) return t == ChartType.BAR || t == ChartType.HBAR;
+        switch (t) {
+            case PIE: {
+                for (double[] row : cd.values) for (double v : row) if (v < 0) return false;
+                return ns == 1 && nx >= 2 && nx <= 12;
+            }
+            case LINE:
+                return nx >= 2;
+            case BAR:
+            case HBAR:
+                return true;
+            default:
+                return false;
+        }
+    }
+
+    private void switchChartType(ChartType t) {
+        for (ChartData cd : shownCharts) if (canShowAs(cd, t)) cd.type = t;
+        chartHost.revalidate();
+        chartHost.repaint();
+        syncTypeButtons();
+    }
+
+    /** Enables the "Show as" buttons the current charts can use and ticks the one in use. */
+    private void syncTypeButtons() {
+        ChartData first = null;
+        for (ChartData cd : shownCharts) if (!cd.fixedType && cd.type != ChartType.SCATTER && (first == null)) first = cd;
+        boolean any = false;
+        for (int i = 0; i < typeBtns.length; i++) {
+            boolean ok = false;
+            for (ChartData cd : shownCharts) if (canShowAs(cd, SWITCH_TYPES[i])) ok = true;
+            typeBtns[i].setEnabled(ok);
+            any |= ok;
+            if (ok && first != null && first.type == SWITCH_TYPES[i]) typeBtns[i].setSelected(true);
+        }
+        if (!any || first == null) typeGroup.clearSelection();
     }
 
     private void exportCharts() {
@@ -1686,7 +1750,7 @@ public class DataChat extends JFrame {
 
     static final class Plan {
         String intent = "aggregate", title, metric, agg = "sum", x, bucket, series, sort = "none", chart = "auto",
-                from, to, direction = "drop", message;
+                from, to, direction = "drop", message, time;
         Integer limit;
         List<Filter> filters = new ArrayList<>();
 
@@ -1694,7 +1758,7 @@ public class DataChat extends JFrame {
         static Plan fromJson(Map<String, Object> m) {
             Plan p = new Plan();
             String in = lower(nz(m.get("intent")));
-            p.intent = in != null && Set.of("aggregate", "drivers", "rows", "describe", "correlate", "anomalies").contains(in) ? in : "aggregate";
+            p.intent = in != null && Set.of("aggregate", "drivers", "rows", "describe", "correlate", "anomalies", "compare", "forecast").contains(in) ? in : "aggregate";
             p.title = nz(m.get("title"));
             p.metric = nz(m.get("metric"));
             String a = lower(nz(m.get("agg")));
@@ -1707,6 +1771,7 @@ public class DataChat extends JFrame {
             String ch = lower(nz(m.get("chart")));
             if (ch != null) p.chart = ch;
             p.from = nz(m.get("from"));
+            p.time = nz(m.get("time"));
             p.to = nz(m.get("to"));
             String dir = lower(nz(m.get("direction")));
             if (dir != null) p.direction = dir;
@@ -1754,6 +1819,7 @@ public class DataChat extends JFrame {
             m.put("sort", sort);
             if (limit != null) m.put("limit", limit);
             m.put("chart", chart);
+            if (time != null) m.put("time", time);
             if (from != null) m.put("from", from);
             if (to != null) m.put("to", to);
             if (intent.equals("drivers")) m.put("direction", direction);
@@ -1773,6 +1839,7 @@ public class DataChat extends JFrame {
             c.sort = sort;
             c.chart = chart;
             c.from = from;
+            c.time = time;
             c.to = to;
             c.direction = direction;
             c.message = message;
@@ -1801,6 +1868,11 @@ public class DataChat extends JFrame {
         List<double[]> values = new ArrayList<>();
         boolean signColors;
         Set<Integer> highlight = new HashSet<>();
+        boolean fixedType;                          // true: this chart can't be switched to another type (forecasts)
+        double[] bandLo, bandHi;                    // optional shaded band behind a line chart (a forecast's range)
+        int forecastFrom = -1;                      // first x index that is a projection (drawn on a shaded background)
+        Set<Integer> dashed = new HashSet<>();      // series drawn as dashed lines
+        String note;                                // small caption at the right of the legend row
         // ---- scatter plots: one x/y array per series, plus the fitted line {slope, intercept, r, n}
         List<double[]> sx = new ArrayList<>(), sy = new ArrayList<>();
         double[] fit;
@@ -1944,6 +2016,8 @@ public class DataChat extends JFrame {
                 case "drivers" -> drivers(t, p, keep, r);
                 case "correlate" -> correlate(t, p, keep, r);
                 case "anomalies" -> anomalies(t, p, keep, r);
+                case "compare" -> compare(t, p, keep, r);
+                case "forecast" -> forecast(t, p, keep, r);
                 default -> aggregate(t, p, keep, r);
             }
             if (p.message != null) r.facts.add(p.message);
@@ -2500,6 +2574,559 @@ public class DataChat extends JFrame {
                 by.computeIfAbsent(bucketLabel(xc.date[i], bucket), k -> new Acc()).add(v, agg.equals("median"));
             }
             return by;
+        }
+
+        // ------------------------------------------------------------ period comparison
+        /** A period label ("2026-03", "2026-Q1", "2026", "2026-W09", "2026-03-15") or a range ("2026-01-01..2026-03-31") as {start, end}. */
+        static LocalDate[] spanOf(String label) throws AnalysisException {
+            String s = label == null ? "" : label.trim();
+            if (s.contains("..")) {
+                String[] ab = s.split("\\.\\.", 2);
+                return new LocalDate[]{spanOf(ab[0])[0], spanOf(ab[1])[1]};
+            }
+            Matcher m;
+            try {
+                if ((m = Pattern.compile("(\\d{4})-[Ww](\\d{1,2})").matcher(s)).matches()) {
+                    LocalDate d = LocalDate.of(Integer.parseInt(m.group(1)), 1, 4)
+                            .with(IsoFields.WEEK_OF_WEEK_BASED_YEAR, Integer.parseInt(m.group(2))).with(java.time.DayOfWeek.MONDAY);
+                    return new LocalDate[]{d, d.plusDays(6)};
+                }
+                if ((m = Pattern.compile("(\\d{4})-[Qq]([1-4])").matcher(s)).matches()) {
+                    LocalDate d = LocalDate.of(Integer.parseInt(m.group(1)), (Integer.parseInt(m.group(2)) - 1) * 3 + 1, 1);
+                    return new LocalDate[]{d, d.plusMonths(3).minusDays(1)};
+                }
+                if ((m = Pattern.compile("(\\d{4})-(\\d{1,2})-(\\d{1,2})").matcher(s)).matches()) {
+                    LocalDate d = LocalDate.of(Integer.parseInt(m.group(1)), Integer.parseInt(m.group(2)), Integer.parseInt(m.group(3)));
+                    return new LocalDate[]{d, d};
+                }
+                if ((m = Pattern.compile("(\\d{4})-(\\d{1,2})").matcher(s)).matches()) {
+                    LocalDate d = LocalDate.of(Integer.parseInt(m.group(1)), Integer.parseInt(m.group(2)), 1);
+                    return new LocalDate[]{d, d.withDayOfMonth(d.lengthOfMonth())};
+                }
+                if ((m = Pattern.compile("(\\d{4})").matcher(s)).matches()) {
+                    int y = Integer.parseInt(m.group(1));
+                    return new LocalDate[]{LocalDate.of(y, 1, 1), LocalDate.of(y, 12, 31)};
+                }
+            } catch (java.time.DateTimeException | NumberFormatException e) {
+                // fall through to the message below
+            }
+            throw new AnalysisException("I couldn't read \"" + s + "\" as a period. Use a month (2026-03), quarter (2026-Q1), year (2026), week (2026-W09), day (2026-03-15) "
+                    + "or a range (2026-01-01..2026-03-31).");
+        }
+
+        static long daysIn(LocalDate[] span) { return ChronoUnit.DAYS.between(span[0], span[1]) + 1; }
+
+        /** label -> {valueA, valueB, rowsA, rowsB} for each value of a text column. */
+        static Map<String, double[]> splitBy(DataTable t, Column dim, boolean[] inA, boolean[] inB, Column m, String agg) {
+            Map<String, Acc[]> acc = new LinkedHashMap<>();
+            for (int i = 0; i < t.rows; i++) {
+                if (!inA[i] && !inB[i]) continue;
+                String k = dim.text[i] == null || dim.text[i].isBlank() ? null : dim.text[i].trim();
+                if (k == null) continue;
+                double v = m == null ? 1 : m.num[i];
+                if (Double.isNaN(v)) continue;
+                Acc[] pair = acc.computeIfAbsent(k, x -> new Acc[]{new Acc(), new Acc()});
+                if (inA[i]) pair[0].add(v, agg.equals("median"));
+                if (inB[i]) pair[1].add(v, agg.equals("median"));
+            }
+            Map<String, double[]> out = new LinkedHashMap<>();
+            for (var e : acc.entrySet())
+                out.put(e.getKey(), new double[]{nz0(e.getValue()[0].get(agg)), nz0(e.getValue()[1].get(agg)), e.getValue()[0].n, e.getValue()[1].n});
+            return out;
+        }
+
+        static double total(DataTable t, boolean[] in, Column m, String agg) {
+            Acc a = new Acc();
+            for (int i = 0; i < t.rows; i++) {
+                if (!in[i]) continue;
+                double v = m == null ? 1 : m.num[i];
+                if (!Double.isNaN(v)) a.add(v, agg.equals("median"));
+            }
+            return nz0(a.get(agg));
+        }
+
+        static void compare(DataTable t, Plan p, boolean[] keep, Result r) throws AnalysisException {
+            Column tc = p.time != null ? need(t, p.time, "date column") : t.firstOfType(ColType.DATE);
+            if (tc == null || tc.type != ColType.DATE) throw new AnalysisException("Comparing periods needs a date column, and this table doesn't have one.");
+            if (p.from == null || p.to == null)
+                throw new AnalysisException("Tell me which two periods to compare, for example \"compare February and March\", \"Q1 vs Q2\" or \"this month vs last month\".");
+            LocalDate[] spA = spanOf(p.from), spB = spanOf(p.to);
+            Column m = metricOf(t, p);
+            String agg = aggOf(p, m), measure = measureLabel(agg, m);
+            boolean[] inA = new boolean[t.rows], inB = new boolean[t.rows];
+            int nA = 0, nB = 0;
+            for (int i = 0; i < t.rows; i++) {
+                LocalDate d = tc.date[i];
+                if (!keep[i] || d == null) continue;
+                if (!d.isBefore(spA[0]) && !d.isAfter(spA[1])) { inA[i] = true; nA++; }
+                if (!d.isBefore(spB[0]) && !d.isAfter(spB[1])) { inB[i] = true; nB++; }
+            }
+            if (nA == 0) throw new AnalysisException("No rows fall in " + p.from + (tc.dmin != null ? " (your " + tc.name + " dates run from " + tc.dmin + " to " + tc.dmax + ")" : "") + ".");
+            if (nB == 0) throw new AnalysisException("No rows fall in " + p.to + (tc.dmin != null ? " (your " + tc.name + " dates run from " + tc.dmin + " to " + tc.dmax + ")" : "") + ".");
+            double totA = total(t, inA, m, agg), totB = total(t, inB, m, agg), totD = totB - totA;
+            boolean add = additive(agg);
+
+            // which column to break the change down by
+            Column dim = optional(t, p.x, "breakdown");
+            if (dim != null && dim.type != ColType.TEXT)
+                throw new AnalysisException("I can only break a comparison down by a text column, and \"" + dim.name + "\" isn't one.");
+            boolean auto = false;
+            Map<String, double[]> parts = null;
+            if (dim == null) {
+                double best = -1;
+                for (Column c : t.cols) {
+                    if (c.type != ColType.TEXT) continue;
+                    int dc = c.distinctCount();
+                    if (dc < 2 || dc > 12) continue;
+                    Map<String, double[]> cand = splitBy(t, c, inA, inB, m, agg);
+                    double score = 0;
+                    for (double[] v : cand.values()) score += Math.abs(v[1] - v[0]);
+                    if (score > best) {
+                        best = score;
+                        dim = c;
+                        parts = cand;
+                        auto = true;
+                    }
+                }
+            } else parts = splitBy(t, dim, inA, inB, m, agg);
+
+            // ---- table
+            r.headers.add(dim == null ? "Total" : dim.name);
+            r.headers.addAll(List.of(p.from, p.to, "Change", "Change %"));
+            if (add) r.headers.add("Share of change");
+            r.rows.add(compareRow("Total", totA, totB, add ? 1.0 : Double.NaN, add));
+            List<Map.Entry<String, double[]>> ranked = new ArrayList<>();
+            if (parts != null) {
+                ranked.addAll(parts.entrySet());
+                ranked.sort((x, y) -> Double.compare(Math.abs(y.getValue()[1] - y.getValue()[0]), Math.abs(x.getValue()[1] - x.getValue()[0])));
+            }
+            int lim = Math.max(1, Math.min(p.limit != null ? p.limit : 12, 100));
+            List<Map.Entry<String, double[]>> shown = ranked.subList(0, Math.min(lim, ranked.size()));
+            for (var e : shown)
+                r.rows.add(compareRow(e.getKey(), e.getValue()[0], e.getValue()[1], add && totD != 0 ? (e.getValue()[1] - e.getValue()[0]) / totD : Double.NaN, add));
+            r.title = p.title != null ? p.title : measure + ": " + p.from + " vs " + p.to + (dim != null ? " by " + dim.name : "");
+
+            // ---- charts: side by side, then the change itself
+            ChartData side = new ChartData();
+            side.title = r.title;
+            side.yLabel = measure;
+            side.series = new ArrayList<>(List.of(p.from, p.to));
+            double[] va = new double[0], vb = new double[0];
+            if (dim == null) {
+                side.labels = new ArrayList<>(List.of("Total"));
+                va = new double[]{totA};
+                vb = new double[]{totB};
+            } else {
+                List<Map.Entry<String, double[]>> top = new ArrayList<>(ranked);
+                top.sort((x, y) -> Double.compare(Math.max(Math.abs(y.getValue()[0]), Math.abs(y.getValue()[1])), Math.max(Math.abs(x.getValue()[0]), Math.abs(x.getValue()[1]))));
+                top = top.subList(0, Math.min(10, top.size()));
+                va = new double[top.size()];
+                vb = new double[top.size()];
+                for (int i = 0; i < va.length; i++) {
+                    side.labels.add(top.get(i).getKey());
+                    va[i] = top.get(i).getValue()[0];
+                    vb[i] = top.get(i).getValue()[1];
+                }
+            }
+            side.values.add(va);
+            side.values.add(vb);
+            boolean neg = false;
+            int maxLab = 0;
+            for (double v : va) if (v < 0) neg = true;
+            for (double v : vb) if (v < 0) neg = true;
+            for (String s : side.labels) maxLab = Math.max(maxLab, s.length());
+            side.type = side.labels.size() > 6 || maxLab > 12 ? ChartType.HBAR : ChartType.BAR;
+            r.charts.add(side);
+            if (dim != null && shown.size() >= 2) {
+                ChartData chg = new ChartData();
+                chg.title = "Change in " + measure.toLowerCase(Locale.ROOT) + ", " + p.from + " to " + p.to + ", by " + dim.name;
+                chg.type = ChartType.HBAR;
+                chg.signColors = true;
+                chg.yLabel = "Change";
+                chg.series = new ArrayList<>(List.of("Change"));
+                double[] dv = new double[Math.min(10, shown.size())];
+                for (int i = 0; i < dv.length; i++) {
+                    chg.labels.add(shown.get(i).getKey());
+                    dv[i] = shown.get(i).getValue()[1] - shown.get(i).getValue()[0];
+                }
+                chg.values.add(dv);
+                r.charts.add(chg);
+            }
+
+            // ---- plain-English facts
+            String filt = matchedNote(r, p);
+            r.facts.add(measure + " was " + Fmt.full(totA) + " in " + p.from + " and " + Fmt.full(totB) + " in " + p.to + ": "
+                    + (totD >= 0 ? "up " : "down ") + Fmt.full(Math.abs(totD)) + (totA != 0 ? " (" + Fmt.pct(totD / Math.abs(totA)) + ")" : "") + filt + ".");
+            r.facts.add("That is based on " + Fmt.full(nA) + " rows in " + p.from + " and " + Fmt.full(nB) + " rows in " + p.to + ".");
+            if (dim != null && !ranked.isEmpty()) {
+                Map.Entry<String, double[]> lead = null, counter = null;
+                for (var e : ranked) {
+                    double d = e.getValue()[1] - e.getValue()[0];
+                    if (lead == null && (totD == 0 || d * totD > 0)) lead = e;
+                    if (counter == null && totD != 0 && d * totD < 0) counter = e;
+                }
+                if (lead == null) lead = ranked.get(0);
+                double ld = lead.getValue()[1] - lead.getValue()[0];
+                StringBuilder sb = new StringBuilder("By " + dim.name + ", the biggest contributor was " + lead.getKey() + " (" + Fmt.signed(ld)
+                        + (lead.getValue()[0] != 0 ? ", " + Fmt.pct(ld / Math.abs(lead.getValue()[0])) : "")
+                        + (add && totD != 0 ? ", " + Fmt.share(ld / totD) + " of the net change" : "") + ")");
+                if (counter != null) {
+                    double cd = counter.getValue()[1] - counter.getValue()[0];
+                    sb.append("; the biggest move the other way was ").append(counter.getKey()).append(" (").append(Fmt.signed(cd))
+                            .append(counter.getValue()[0] != 0 ? ", " + Fmt.pct(cd / Math.abs(counter.getValue()[0])) : "").append(")");
+                }
+                r.facts.add(sb.append(".").toString());
+                if (auto) r.facts.add("I broke it down by " + dim.name + " because that column moved the most; add \"by region\" (or another column) to choose a different one.");
+            }
+            long la = daysIn(spA), lb = daysIn(spB);
+            if (add && Math.abs(la - lb) > 0.1 * Math.max(la, lb))
+                r.facts.add("The periods differ in length (" + la + " vs " + lb + " days), so the totals aren't like for like. Ask for the average instead for a fairer comparison.");
+            for (String[] pe : new String[][]{{p.from, spA[0].toString(), spA[1].toString()}, {p.to, spB[0].toString(), spB[1].toString()}}) {
+                LocalDate s0 = LocalDate.parse(pe[1]), e0 = LocalDate.parse(pe[2]);
+                if (tc.dmax != null && e0.isAfter(tc.dmax) && !s0.isAfter(tc.dmax))
+                    r.facts.add("Your data ends on " + tc.dmax + ", so " + pe[0] + " is only partly covered and its total will look lower than a full period.");
+                else if (tc.dmin != null && s0.isBefore(tc.dmin) && !e0.isBefore(tc.dmin))
+                    r.facts.add("Your data starts on " + tc.dmin + ", so " + pe[0] + " is only partly covered.");
+            }
+            if (p.to.matches("\\d{4}-\\d{2}") && add)
+                r.facts.add("Ask \"what's driving the " + (totD < 0 ? "drop" : "rise") + " in " + p.to + "?\" for a full driver analysis across every column.");
+        }
+
+        private static String[] compareRow(String label, double a, double b, double share, boolean add) {
+            double d = b - a;
+            List<String> row = new ArrayList<>(List.of(label, Fmt.full(a), Fmt.full(b), Fmt.signed(d), a != 0 ? Fmt.pct(d / Math.abs(a)) : "n/a"));
+            if (add) row.add(Double.isNaN(share) ? "" : Fmt.share(share));
+            return row.toArray(new String[0]);
+        }
+
+        // ------------------------------------------------------------ forecast
+        static final int MIN_FORECAST_PERIODS = 6;
+
+        /** Trend (least squares) plus an optional repeating seasonal pattern; sigma is the residual spread. */
+        record Model(double a, double b, double[] season, double sigma, int n, double sxx, boolean flat) {
+            double at(int t) { return a + b * t + season[t % season.length]; }
+
+            double spread(int t) {
+                double tbar = (n - 1) / 2.0;
+                return sigma * Math.sqrt(1.0 + 1.0 / n + (t - tbar) * (t - tbar) / sxx);
+            }
+        }
+
+        static int seasonLength(String bucket, int n) {
+            switch (bucket) {
+                case "day": return n >= 14 ? 7 : 1;
+                case "week": return n >= 104 ? 52 : 1;
+                case "month": return n >= 24 ? 12 : 1;
+                case "quarter": return n >= 8 ? 4 : 1;
+                default: return 1;
+            }
+        }
+
+        static Model fitModel(double[] y, int m) {
+            int n = y.length;
+            double[] s = new double[Math.max(1, m)];
+            double a = 0, b = 0, tbar = (n - 1) / 2.0, sxx = 0;
+            for (int i = 0; i < n; i++) sxx += (i - tbar) * (i - tbar);
+            for (int iter = 0; iter < (m > 1 ? 4 : 1); iter++) {
+                double ybar = 0;
+                double[] z = new double[n];
+                for (int i = 0; i < n; i++) {
+                    z[i] = y[i] - s[i % s.length];
+                    ybar += z[i];
+                }
+                ybar /= n;
+                double sxy = 0;
+                for (int i = 0; i < n; i++) sxy += (i - tbar) * (z[i] - ybar);
+                b = sxx > 0 ? sxy / sxx : 0;
+                a = ybar - b * tbar;
+                if (m > 1) {
+                    double[] sum = new double[m];
+                    int[] cnt = new int[m];
+                    for (int i = 0; i < n; i++) {
+                        sum[i % m] += y[i] - (a + b * i);
+                        cnt[i % m]++;
+                    }
+                    double mean = 0;
+                    for (int j = 0; j < m; j++) {
+                        s[j] = cnt[j] > 0 ? sum[j] / cnt[j] : 0;
+                        mean += s[j];
+                    }
+                    mean /= m;
+                    for (int j = 0; j < m; j++) s[j] -= mean;
+                }
+            }
+            double sse = 0;
+            for (int i = 0; i < n; i++) {
+                double e = y[i] - (a + b * i + s[i % s.length]);
+                sse += e * e;
+            }
+            int dof = n - 2 - (m > 1 ? m - 1 : 0);
+            if (dof < 1) dof = Math.max(1, n - 2);
+            return new Model(a, b, s, Math.sqrt(sse / dof), n, Math.max(sxx, 1e-9), false);
+        }
+
+        /** The trend model, unless its slope is within the noise: then the projection holds the recent level (plus any seasonal pattern). */
+        static Model chooseModel(double[] y, int m, int recentN) {
+            Model fit = fitModel(y, m);
+            double slopeT = fit.b() / (fit.sigma() / Math.sqrt(fit.sxx()) + 1e-12);
+            if (Math.abs(slopeT) >= 2) return fit;
+            int n = y.length;
+            double[] z = new double[n];
+            double mean = 0, lvl = 0;
+            for (int i = 0; i < n; i++) {
+                z[i] = y[i] - fit.season()[i % fit.season().length];
+                mean += z[i];
+            }
+            mean /= n;
+            for (int i = n - recentN; i < n; i++) lvl += z[i];
+            lvl /= recentN;
+            double ss = 0;
+            for (double v : z) ss += (v - mean) * (v - mean);
+            return new Model(lvl, 0, fit.season(), Math.sqrt(ss / Math.max(1, n - 1)), recentN, 1e12, true);
+        }
+
+        static LocalDate nextStart(LocalDate d, String bucket) {
+            switch (bucket) {
+                case "week": return d.plusWeeks(1);
+                case "month": return d.plusMonths(1);
+                case "quarter": return d.plusMonths(3);
+                case "year": return d.plusYears(1);
+                default: return d.plusDays(1);
+            }
+        }
+
+        static int defaultHorizon(String bucket) {
+            switch (bucket) {
+                case "day": return 14;
+                case "week": return 8;
+                case "month": return 3;
+                case "quarter": return 2;
+                default: return 2;
+            }
+        }
+
+        /** How many of the next-finer periods make up one of this size (used when the history is too short for the asked size). */
+        static int stepRatio(String from, String to) {
+            if (from.equals("year") && to.equals("quarter")) return 4;
+            if (from.equals("quarter") && to.equals("month")) return 3;
+            if (from.equals("month") && to.equals("week")) return 4;
+            if (from.equals("week") && to.equals("day")) return 7;
+            return 1;
+        }
+
+        static void forecast(DataTable t, Plan p, boolean[] keep, Result r) throws AnalysisException {
+            Column xc = p.x != null ? need(t, p.x, "date column") : t.firstOfType(ColType.DATE);
+            if (xc == null || xc.type != ColType.DATE) throw new AnalysisException("A forecast needs a date column, and this table doesn't have one.");
+            Column m = metricOf(t, p);
+            String agg = aggOf(p, m), measure = measureLabel(agg, m);
+            boolean add = additive(agg);
+            LocalDate mn = null, mx = null;
+            for (int i = 0; i < t.rows; i++) {
+                if (!keep[i] || xc.date[i] == null) continue;
+                if (mn == null || xc.date[i].isBefore(mn)) mn = xc.date[i];
+                if (mx == null || xc.date[i].isAfter(mx)) mx = xc.date[i];
+            }
+            if (mn == null) throw new AnalysisException("None of the matching rows has a usable " + xc.name + " date.");
+
+            String bucket = bucketOf(p.bucket, xc, keep);
+            if (bucket.equals("weekday")) bucket = "day";
+            String asked = bucket;
+            List<String> notes = new ArrayList<>();
+
+            // history on a gap-free calendar grid (a missing period is a real zero for sums and counts)
+            List<String> labels;
+            double[] y;
+            int missing;
+            while (true) {
+                TreeMap<String, Acc> byP = groupByPeriod(t, keep, xc, m, agg, bucket);
+                labels = new ArrayList<>();
+                List<Double> vals = new ArrayList<>();
+                missing = 0;
+                double carry = Double.NaN;
+                for (LocalDate d = periodStart(mn, bucket); !d.isAfter(periodStart(mx, bucket)); d = nextStart(d, bucket)) {
+                    String lab = bucketLabel(d, bucket);
+                    Acc a = byP.get(lab);
+                    double v;
+                    if (a != null) v = nz0(a.get(agg));
+                    else {
+                        missing++;
+                        v = add ? 0 : carry;
+                    }
+                    if (!Double.isNaN(v)) carry = v;
+                    labels.add(lab);
+                    vals.add(v);
+                }
+                for (int i = 0; i < vals.size(); i++) if (Double.isNaN(vals.get(i))) vals.set(i, carry);
+                y = vals.stream().mapToDouble(Double::doubleValue).toArray();
+                // a part-covered first or last period would drag the trend, so it is left out when enough periods remain
+                boolean partialLast = add && !bucket.equals("day") && periodEnd(mx, bucket).isAfter(mx);
+                boolean partialFirst = add && !bucket.equals("day") && periodStart(mn, bucket).isBefore(mn);
+                int drop = (partialLast ? 1 : 0) + (partialFirst ? 1 : 0);
+                if (labels.size() - drop >= MIN_FORECAST_PERIODS || bucket.equals("day")) {
+                    if (partialLast && labels.size() - drop >= MIN_FORECAST_PERIODS) {
+                        notes.add(labels.get(labels.size() - 1));
+                        labels.remove(labels.size() - 1);
+                        y = Arrays.copyOf(y, y.length - 1);
+                    }
+                    if (partialFirst && labels.size() >= MIN_FORECAST_PERIODS + 1) {
+                        notes.add(labels.get(0));
+                        labels.remove(0);
+                        y = Arrays.copyOfRange(y, 1, y.length);
+                    }
+                    break;
+                }
+                bucket = BUCKET_ORDER[Math.min(BUCKET_ORDER.length - 1, Arrays.asList(BUCKET_ORDER).indexOf(bucket) + 1)];
+            }
+            int n = y.length;
+            if (n < MIN_FORECAST_PERIODS)
+                throw new AnalysisException("There are only " + n + " " + bucket + "s of history, and I need at least " + MIN_FORECAST_PERIODS + " to project a trend.");
+
+            // horizon
+            int ratio = 1;
+            if (!bucket.equals(asked)) {
+                String cur = asked;
+                while (!cur.equals(bucket)) {
+                    String nxt = BUCKET_ORDER[Arrays.asList(BUCKET_ORDER).indexOf(cur) + 1];
+                    ratio *= stepRatio(cur, nxt);
+                    cur = nxt;
+                }
+            }
+            int h = p.limit != null ? p.limit * ratio : defaultHorizon(bucket);
+            int hmax = Math.max(1, Math.min(60, n / 2));
+            if (h > hmax) {
+                notes.add("__cap__" + hmax);
+                h = hmax;
+            }
+            int season = seasonLength(bucket, n);
+            int recentN = Math.min(n, season > 1 ? season : 4);
+            Model model = chooseModel(y, season, recentN);
+            double lastActual = 0;
+            for (int i = n - recentN; i < n; i++) lastActual += y[i];
+            lastActual /= recentN;
+            boolean nonNeg = true;
+            for (double v : y) if (v < 0) nonNeg = false;
+            nonNeg = nonNeg && add;
+            double[] fc = new double[h], lo = new double[h], hi = new double[h];
+            LocalDate d = periodStart(mx, bucket);
+            if (!labels.isEmpty()) {
+                try {
+                    d = spanOf(labels.get(labels.size() - 1))[0];
+                } catch (AnalysisException ignored) {
+                    // labels are produced by bucketLabel, which spanOf understands
+                }
+            }
+            List<String> future = new ArrayList<>();
+            for (int k = 0; k < h; k++) {
+                d = nextStart(d, bucket);
+                future.add(bucketLabel(d, bucket));
+                int tt = n + k;
+                double f = model.at(tt), se = 1.96 * model.spread(tt);
+                if (nonNeg) f = Math.max(0, f);
+                fc[k] = f;
+                lo[k] = nonNeg ? Math.max(0, f - se) : f - se;
+                hi[k] = f + se;
+            }
+
+            // ---- backtest: hide the last few periods, forecast them, and see how wrong that was
+            Double modelErr = null, naiveErr = null;
+            int kb = Math.max(1, Math.min(h, n / 3));
+            if (n - kb >= 5) {
+                double[] train = Arrays.copyOf(y, n - kb);
+                int mt = seasonLength(bucket, train.length);
+                Model bm = chooseModel(train, mt, Math.min(train.length, mt > 1 ? mt : 4));
+                double sa = 0, sn = 0, sy = 0;
+                for (int k = 0; k < kb; k++) {
+                    double actual = y[n - kb + k], pred = bm.at(train.length + k);
+                    if (nonNeg) pred = Math.max(0, pred);
+                    double naive = mt > 1 ? train[train.length - mt + (k % mt)] : train[train.length - 1];
+                    sa += Math.abs(actual - pred);
+                    sn += Math.abs(actual - naive);
+                    sy += Math.abs(actual);
+                }
+                if (sy > 0) {
+                    modelErr = sa / sy;
+                    naiveErr = sn / sy;
+                }
+            }
+
+            // ---- table
+            r.headers.addAll(List.of(xc.name + " (" + bucket + ")", "Forecast", "Low (95%)", "High (95%)", "vs recent average"));
+            for (int k = 0; k < h; k++)
+                r.rows.add(new String[]{future.get(k), Fmt.full(fc[k]), Fmt.full(lo[k]), Fmt.full(hi[k]),
+                        lastActual != 0 ? Fmt.pct((fc[k] - lastActual) / Math.abs(lastActual)) : "n/a"});
+            r.title = p.title != null ? p.title : "Forecast: " + measure + ", next " + h + " " + bucket + (h == 1 ? "" : "s");
+
+            // ---- chart: history, then the projection with its range
+            ChartData cd = new ChartData();
+            cd.type = ChartType.LINE;
+            cd.fixedType = true;
+            cd.title = r.title;
+            cd.xLabel = xc.name + " (" + bucket + ")";
+            cd.yLabel = measure;
+            cd.labels = new ArrayList<>(labels);
+            cd.labels.addAll(future);
+            int total = n + h;
+            double[] act = new double[total], fline = new double[total], blo = new double[total], bhi = new double[total];
+            Arrays.fill(act, Double.NaN);
+            Arrays.fill(fline, Double.NaN);
+            Arrays.fill(blo, Double.NaN);
+            Arrays.fill(bhi, Double.NaN);
+            for (int i = 0; i < n; i++) act[i] = y[i];
+            fline[n - 1] = blo[n - 1] = bhi[n - 1] = y[n - 1];   // joins the projection to the last real point
+            for (int k = 0; k < h; k++) {
+                fline[n + k] = fc[k];
+                blo[n + k] = lo[k];
+                bhi[n + k] = hi[k];
+            }
+            cd.series = new ArrayList<>(List.of("Actual", "Forecast"));
+            cd.values.add(act);
+            cd.values.add(fline);
+            cd.dashed.add(1);
+            cd.bandLo = blo;
+            cd.bandHi = bhi;
+            cd.forecastFrom = n;
+            cd.note = "Shaded band: about 95% range";
+            r.charts.add(cd);
+
+            // ---- plain-English facts
+            String filt = matchedNote(r, p);
+            int li = h - 1;
+            r.facts.add("Based on " + n + " " + bucket + "s of history (" + labels.get(0) + " to " + labels.get(n - 1) + ")" + filt + ", " + measure + " is projected at "
+                    + Fmt.full(fc[li]) + " in " + future.get(li) + (lastActual != 0 ? " (" + Fmt.pct((fc[li] - lastActual) / Math.abs(lastActual)) + " vs the recent average of " + Fmt.full(lastActual) + ")" : "")
+                    + ", most likely between " + Fmt.full(lo[li]) + " and " + Fmt.full(hi[li]) + ".");
+            if (add && h > 1) {
+                double sum = 0;
+                for (double f : fc) sum += f;
+                r.facts.add("Over the next " + h + " " + bucket + "s that adds up to about " + Fmt.full(sum) + ".");
+            }
+            double mean = 0;
+            for (double v : y) mean += v;
+            mean /= n;
+            if (model.flat())
+                r.facts.add("There is no clear trend: the " + bucket + "-to-" + bucket + " movement is within the normal noise, so the projection holds the recent level" + (season > 1 ? " plus the repeating pattern" : "") + ".");
+            else
+                r.facts.add("The underlying trend is " + (model.b() > 0 ? "up" : "down") + " about " + Fmt.full(Math.abs(model.b())) + " per " + bucket
+                        + (mean != 0 ? " (" + String.format(Locale.US, "%.1f%%", Math.abs(model.b() / mean) * 100) + " of the average)" : "") + ".");
+            if (season > 1) r.facts.add("A repeating pattern every " + season + " " + bucket + "s was included.");
+            else if (!bucket.equals("year") && seasonLength(bucket, 1000) > 1)
+                r.facts.add("There isn't enough history to model a repeating " + (bucket.equals("day") ? "weekly" : bucket.equals("month") ? "yearly" : bucket.equals("quarter") ? "yearly" : "yearly")
+                        + " pattern (that takes at least two full cycles), so none was included.");
+            if (modelErr != null) {
+                r.facts.add("Reliability check: when I hid the last " + kb + " " + bucket + (kb == 1 ? "" : "s") + " and forecast them from the earlier history, the average error was "
+                        + String.format(Locale.US, "%.1f%%", modelErr * 100) + " (simply repeating the previous " + (season > 1 ? "cycle" : "period") + " would have been off by "
+                        + String.format(Locale.US, "%.1f%%", naiveErr * 100) + ")"
+                        + (modelErr > naiveErr * 1.05 ? ", so treat this projection with extra caution." : "."));
+            }
+            if (n < 12) r.facts.add("With only " + n + " " + bucket + "s of history this is a rough guide at best" + (modelErr == null ? ", and there isn't enough to test it against the past" : "") + ".");
+            if (!bucket.equals(asked)) r.facts.add("There isn't enough history at " + asked + " level, so I worked in " + bucket + "s instead.");
+            if (missing > 0) r.facts.add(missing + " " + bucket + (missing == 1 ? "" : "s") + " had no rows" + (add ? " and counted as zero." : " and carried the previous value."));
+            for (String nt : notes) {
+                if (nt.startsWith("__cap__")) r.facts.add("I limited the projection to " + nt.substring(7) + " " + bucket + "s, because looking much further ahead than half your history is guesswork.");
+            }
+            List<String> partial = new ArrayList<>();
+            for (String nt : notes) if (!nt.startsWith("__cap__")) partial.add(nt);
+            if (!partial.isEmpty()) r.facts.add("Left out the partly-covered " + String.join(" and ", partial) + " so an incomplete period isn't read as a dip.");
+            r.facts.add("This carries past patterns forward; it can't know about promotions, closures or one-off events, and the further ahead it looks the less reliable it is.");
         }
 
         // ------------------------------------------------------------ describe
@@ -3423,6 +4050,20 @@ public class DataChat extends JFrame {
                 p.to = null;
                 p.limit = fresh.limit;
                 notes.add("looking for unusual values");
+            } else if (fresh.intent.equals("compare") || fresh.intent.equals("forecast")) {
+                p.intent = fresh.intent;
+                p.x = fresh.x;
+                p.time = fresh.time;
+                p.from = fresh.from;
+                p.to = fresh.to;
+                p.bucket = fresh.bucket;
+                p.metric = fresh.metric;
+                p.agg = fresh.agg;
+                p.series = null;
+                p.chart = fresh.chart;
+                p.sort = "none";
+                p.limit = fresh.limit;
+                notes.add(fresh.intent.equals("compare") ? "comparing the two periods" : "projecting forward");
             } else if (fresh.intent.equals("correlate")) {
                 p.intent = "correlate";
                 p.x = fresh.x;
@@ -3471,6 +4112,42 @@ public class DataChat extends JFrame {
                         p.series = gc.name;
                         notes.add("comparing within each " + gc.name);
                     }
+                }
+            } else if (prev.intent.equals("compare")) {
+                if (metricNamed && fresh.metric != null) {
+                    p.metric = fresh.metric;
+                    notes.add("measuring " + fresh.metric);
+                }
+                if (aggWord) {
+                    p.agg = fresh.agg;
+                    if (fresh.metric == null && fresh.agg.equals("count") && !metricNamed) p.metric = null;
+                    notes.add("using " + p.agg);
+                }
+                if (groupNamed) {
+                    Column gc = t.find(fresh.x);
+                    if (gc != null && gc.type == ColType.TEXT) {
+                        p.x = gc.name;
+                        notes.add("breaking the change down by " + gc.name);
+                    }
+                }
+                if (fresh.limit != null) {
+                    p.limit = fresh.limit;
+                    notes.add("showing the top " + fresh.limit);
+                }
+            } else if (prev.intent.equals("forecast")) {
+                if (metricNamed && fresh.metric != null) {
+                    p.metric = fresh.metric;
+                    notes.add("forecasting " + fresh.metric);
+                }
+                if (aggWord) {
+                    p.agg = fresh.agg;
+                    notes.add("using " + p.agg);
+                }
+                Matcher hm = Pattern.compile(" (?:(\\d+) )(day|week|month|quarter|year)s? ").matcher(qn);
+                if (hm.find()) {
+                    p.limit = Integer.parseInt(hm.group(1));
+                    p.bucket = hm.group(2);
+                    notes.add("looking " + p.limit + " " + p.bucket + (p.limit == 1 ? "" : "s") + " ahead");
                 }
             } else if (prev.intent.equals("rows") && !groupNamed && !aggWord) {
                 if (metricNamed && fresh.metric != null) {
@@ -3604,7 +4281,7 @@ public class DataChat extends JFrame {
             boolean anomWord = has(qn, " (anomal\\w*|outliers?|unusual\\w*|abnormal\\w*|irregular\\w*|suspicious\\w*|odd|strange|weird|unexpected\\w*|atypical|aberrant|fishy|out of the ordinary|out of line|stand out|stands out|standing out|extreme) ");
             boolean change = time != null && !anomWord && has(qn, " (drop|dropped|drops|decline|declined|declining|fall|fell|fallen|falling|decrease|decreased|dip|dipped|slump|slumped|"
                     + "increase|increased|spike|spiked|jump|jumped|surge|surged|rise|rose|grew|why|driving|driver|drivers|drove|cause|caused|reason|reasons|behind|explain|what changed|went down|went up"
-                    + (periodPair ? "|compare|compared|versus|vs|difference|differ" : "") + ") ");
+                    + ") ");
             boolean rise = has(qn, " (increase|increased|spike|spiked|jump|jumped|surge|surged|rise|rose|grew|went up) ") && !has(qn, " (drop|dropped|decline|declined|fall|fell|dip|dipped|slump|decrease|decreased|went down) ");
             boolean rowsIntent = has(qn, " (largest|biggest|highest|smallest|lowest|top|bottom|latest|earliest|newest|oldest) ")
                     && has(qn, " (rows|records|transactions|orders|entries|items|individual|single|lines) ")
@@ -3673,6 +4350,47 @@ public class DataChat extends JFrame {
             if (has(qn, " (pie|donut|doughnut|share|shares|proportion|proportions|percentage|percentages|composition) ")) p.chart = "pie";
             else if (has(qn, " (line|lines|trend|trends|over time) ")) p.chart = "line";
             else if (has(qn, " (bar|bars|column|columns|histogram) ")) p.chart = "bar";
+
+            // ---- forecast
+            if (time != null && (has(qn, " (forecast\\w*|predict\\w*|projection|projections|projected|projecting|extrapolat\\w*|going forward|outlook) ")
+                    || has(qn, " (next|coming|following|upcoming) (\\d+ )?(days?|weeks?|months?|quarters?|years?) "))) {
+                Matcher hm = Pattern.compile(" (?:next|coming|following|upcoming) (?:(\\d+) )?(day|week|month|quarter|year)s? ").matcher(qn);
+                String hb = bucket;
+                Integer horizon = null;
+                if (hm.find()) {
+                    horizon = hm.group(1) != null ? Integer.parseInt(hm.group(1)) : 1;
+                    hb = hm.group(2);
+                }
+                p.intent = "forecast";
+                p.x = time.name;
+                p.bucket = hb;
+                p.limit = horizon;
+                p.sort = "none";
+                p.chart = "line";
+                p.series = null;
+                return p;
+            }
+
+            // ---- compare two periods
+            if (time != null && !has(qn, " (why|driving|driver|drivers|cause|caused|reason|reasons|behind|explain|what changed) ")
+                    && has(qn, " (compare|compared|comparing|comparison|versus|vs|against|difference between|differences between|year over year|yoy|year on year|"
+                    + "month over month|mom|month on month|quarter over quarter|qoq|quarter on quarter|week over week|wow|week on week) ")) {
+                String[] pair = comparePeriods(qn, time);
+                if (pair != null) {
+                    p.intent = "compare";
+                    p.time = time.name;
+                    p.from = pair[0];
+                    p.to = pair[1];
+                    p.x = null;
+                    for (Column c : cats) if (mention(qn, c.name) >= 0 && !filteredCols.contains(c.name)) { p.x = c.name; break; }
+                    p.bucket = null;
+                    p.series = null;
+                    p.sort = "none";
+                    p.chart = "auto";
+                    if (!has(qn, " (top|bottom|best|worst) \\d+ ")) p.limit = null;
+                    return p;
+                }
+            }
 
             // ---- drivers
             if (change && !rowsIntent) {
@@ -3839,6 +4557,73 @@ public class DataChat extends JFrame {
         }
 
         /** Most recent year in the data that contains the given month (or the explicitly asked year). */
+        /** The two periods a comparison question names, oldest first: explicit ("Q1 vs Q2", "feb and march 2026") or relative to the end of the data. */
+        static String[] comparePeriods(String qn, Column time) {
+            // 1. periods named outright, in the order they appear
+            List<String> labels = new ArrayList<>();
+            Matcher tk = Pattern.compile(" (?:(" + MONTH_RE + ")(?: ((?:19|20)\\d\\d))?|q([1-4])(?: ((?:19|20)\\d\\d))?|(?:quarter|qtr) ([1-4])(?: ((?:19|20)\\d\\d))?|((?:19|20)\\d\\d))(?= )").matcher(qn);
+            while (tk.find()) {
+                String label;
+                if (tk.group(1) != null) {
+                    int mo = monthOf(tk.group(1));
+                    int y = pickYear(time, tk.group(2) != null ? Integer.valueOf(tk.group(2)) : null, mo);
+                    label = String.format("%04d-%02d", y, mo);
+                } else if (tk.group(3) != null || tk.group(5) != null) {
+                    int q = Integer.parseInt(tk.group(3) != null ? tk.group(3) : tk.group(5));
+                    String ys = tk.group(3) != null ? tk.group(4) : tk.group(6);
+                    int y = pickYear(time, ys != null ? Integer.valueOf(ys) : null, (q - 1) * 3 + 1);
+                    label = y + "-Q" + q;
+                } else label = tk.group(7);
+                if (!labels.contains(label)) labels.add(label);
+            }
+            if (labels.size() >= 2) {
+                List<String> two = new ArrayList<>(labels.subList(0, 2));
+                Collections.sort(two);
+                return new String[]{two.get(0), two.get(1)};
+            }
+            if (time.dmax == null) return null;
+            LocalDate end = time.dmax;
+            // 2. "last 30 days vs the previous 30 days"
+            Matcher rn = Pattern.compile(" last (\\d+) (days|weeks|months) ").matcher(qn);
+            if (rn.find()) {
+                int n = Integer.parseInt(rn.group(1));
+                String u = rn.group(2);
+                LocalDate bStart = u.equals("days") ? end.minusDays(n - 1L) : u.equals("weeks") ? end.minusWeeks(n).plusDays(1) : end.minusMonths(n).plusDays(1);
+                LocalDate aEnd = bStart.minusDays(1);
+                LocalDate aStart = u.equals("days") ? aEnd.minusDays(n - 1L) : u.equals("weeks") ? aEnd.minusWeeks(n).plusDays(1) : aEnd.minusMonths(n).plusDays(1);
+                return new String[]{aStart + ".." + aEnd, bStart + ".." + end};
+            }
+            // 3. one period against the one before it ("this month vs last month", "year over year", "month over month")
+            String unit = null;
+            if (has(qn, " (year over year|yoy|year on year|vs same period last year|same period last year|a year ago) ")) unit = "yoy";
+            else if (has(qn, " (month over month|mom|month on month) ")) unit = "month";
+            else if (has(qn, " (quarter over quarter|qoq|quarter on quarter) ")) unit = "quarter";
+            else if (has(qn, " (week over week|wow|week on week) ")) unit = "week";
+            else {
+                Matcher um = Pattern.compile(" (?:this|latest|current|last|previous|prior|recent) (week|month|quarter|year) ").matcher(qn);
+                if (um.find()) unit = um.group(1);
+            }
+            if (unit == null) return null;
+            switch (unit) {
+                case "week": {
+                    LocalDate s = end.with(java.time.DayOfWeek.MONDAY);
+                    return new String[]{Engine.bucketLabel(s.minusWeeks(1), "week"), Engine.bucketLabel(end, "week")};
+                }
+                case "month":
+                    return new String[]{Engine.bucketLabel(end.minusMonths(1), "month"), Engine.bucketLabel(end, "month")};
+                case "quarter":
+                    return new String[]{Engine.bucketLabel(end.minusMonths(3), "quarter"), Engine.bucketLabel(end, "quarter")};
+                default: {   // year / yoy: year to date against the same dates a year earlier
+                    if (unit.equals("yoy") && has(qn, " month ")) {
+                        LocalDate ly = end.minusYears(1);
+                        return new String[]{Engine.bucketLabel(ly, "month"), Engine.bucketLabel(end, "month")};
+                    }
+                    LocalDate ys = end.withDayOfYear(1);
+                    return new String[]{ys.minusYears(1) + ".." + end.minusYears(1), ys + ".." + end};
+                }
+            }
+        }
+
         static int pickYear(Column time, Integer asked, int month) {
             if (asked != null) return asked;
             if (time == null || time.dmax == null) return LocalDate.now().getYear();
@@ -3865,7 +4650,7 @@ public class DataChat extends JFrame {
 
                 Reply with ONE JSON object and nothing else (no prose, no markdown fences). Fields:
                 {
-                 "intent": "aggregate" | "drivers" | "rows" | "describe" | "correlate" | "anomalies",
+                 "intent": "aggregate" | "drivers" | "rows" | "describe" | "correlate" | "anomalies" | "compare" | "forecast",
                  "title": short chart title,
                  "metric": exact numeric column name, or null to count rows,
                  "agg": "sum" | "avg" | "count" | "min" | "max" | "median",
@@ -3877,6 +4662,7 @@ public class DataChat extends JFrame {
                  "limit": integer or null,
                  "chart": "bar" | "line" | "pie" | "scatter" | "none",
                  "from": period label or null, "to": period label or null, "direction": "drop" | "rise",
+                 "time": date column name (compare only; defaults to the first date column),
                  "message": optional one-sentence note about an assumption you made
                 }
                 Guidance:
@@ -3892,6 +4678,13 @@ public class DataChat extends JFrame {
                 - "anomalies": unusual values or outliers ("any unusual transactions?", "which weeks look odd?", "outliers in amount by category"). \
                 Set metric to the numeric column to scan (null = scan every numeric column). To look for unusual rows, leave x null; set series to a text column to judge each value against its own group. \
                 To look for unusual time periods, set x to the date column and bucket to the period size (and agg for how to combine the metric). limit = how many to list. The app does the statistics.
+                - "compare": two periods side by side ("compare Q1 and Q2", "this month vs last month", "2025 vs 2026", "last 30 days vs the previous 30 days"). \
+                Set from = the earlier period and to = the later one, as labels: month "2026-03", quarter "2026-Q1", year "2026", week "2026-W09", day "2026-03-15", or a range "2026-01-01..2026-03-31". \
+                Resolve relative wording ("this month", "last quarter", "year to date vs the same period last year") against the LATEST date in the data, not today. \
+                Set x to a text column to break the change down by (null lets the app choose the one that moved most), metric/agg for the measure, time to the date column. \
+                Use "drivers" instead when the user asks WHY something changed.
+                - "forecast": project a measure forward ("forecast revenue for the next 3 months", "where is this heading?"). Set x to the date column, bucket to the period size, \
+                limit to how many periods ahead (null = sensible default), metric and agg for the measure. The app fits the trend and any seasonality and draws the range.
                 - Use exact column names, and for text filters exact values from the column summary. Date filters use ISO text ("2026-03" or "2026-03-15") with ">=" / "<=" / "=".
                 - When the user does not name a measure, pick the most natural numeric column (money-like columns for revenue, sales, spend, transactions) with agg "sum".
                 - If the question refers to the previous question ("now split that by channel", "only North"), start from the previous plan and modify it.
@@ -4259,6 +5052,8 @@ public class DataChat extends JFrame {
         private double[] range(boolean pad) {
             double lo = 0, hi = 0;
             for (double[] row : d.values) for (double v : row) if (!Double.isNaN(v)) { lo = Math.min(lo, v); hi = Math.max(hi, v); }
+            if (d.bandLo != null) for (double v : d.bandLo) if (!Double.isNaN(v)) lo = Math.min(lo, v);
+            if (d.bandHi != null) for (double v : d.bandHi) if (!Double.isNaN(v)) hi = Math.max(hi, v);
             if (hi == lo) hi = lo + 1;
             if (pad) {
                 double span = hi - lo;
@@ -4326,6 +5121,12 @@ public class DataChat extends JFrame {
             FontMetrics fm = g.getFontMetrics();
             int n = d.labels.size(), ns = d.values.size();
             int top = legend(g, w, top0);
+            if (d.note != null) {
+                g.setFont(g.getFont().deriveFont(11f));
+                g.setColor(AXIS);
+                g.drawString(d.note, w - 12 - g.getFontMetrics().stringWidth(d.note), top0 + g.getFontMetrics().getAscent());
+                g.setFont(g.getFont().deriveFont(12f));
+            }
             double[] rg = range(false);
             double step = niceStep((rg[1] - rg[0]) / 5);
             final double lo = Math.floor(rg[0] / step + 1e-9) * step;
@@ -4347,7 +5148,11 @@ public class DataChat extends JFrame {
             final int plotY = top;
             java.util.function.DoubleUnaryOperator yOf = v -> plotY + (hi - v) / (hi - lo) * plotH;
 
-            // highlight bands
+            // projection region (forecasts) and highlight bands
+            if (d.forecastFrom >= 0 && d.forecastFrom < n) {
+                g.setColor(new Color(128, 128, 128, 34));
+                g.fill(new Rectangle2D.Double(left + d.forecastFrom * slot, plotY, (n - d.forecastFrom) * slot, plotH));
+            }
             g.setColor(new Color(255, 193, 7, 55));
             for (int idx : d.highlight) if (idx >= 0 && idx < n) g.fill(new Rectangle2D.Double(left + idx * slot, plotY, slot, plotH));
 
@@ -4367,6 +5172,25 @@ public class DataChat extends JFrame {
             g.drawLine(left, y0, left + plotW, y0);
 
             if (d.type == ChartType.LINE) {
+                if (d.bandLo != null && d.bandHi != null) {
+                    Path2D.Double band = new Path2D.Double();
+                    boolean started = false;
+                    for (int i = 0; i < n; i++) {
+                        if (Double.isNaN(d.bandHi[i])) continue;
+                        double x = left + (i + 0.5) * slot, y = yOf.applyAsDouble(d.bandHi[i]);
+                        if (!started) { band.moveTo(x, y); started = true; } else band.lineTo(x, y);
+                    }
+                    for (int i = n - 1; i >= 0; i--) {
+                        if (Double.isNaN(d.bandLo[i])) continue;
+                        band.lineTo(left + (i + 0.5) * slot, yOf.applyAsDouble(d.bandLo[i]));
+                    }
+                    if (started) {
+                        band.closePath();
+                        Color bc = color(Math.min(1, ns - 1));
+                        g.setColor(new Color(bc.getRed(), bc.getGreen(), bc.getBlue(), 52));
+                        g.fill(band);
+                    }
+                }
                 for (int s = 0; s < ns; s++) {
                     Path2D.Double path = new Path2D.Double();
                     boolean pen = false;
@@ -4377,7 +5201,9 @@ public class DataChat extends JFrame {
                         if (!pen) { path.moveTo(x, y); pen = true; } else path.lineTo(x, y);
                     }
                     g.setColor(color(s));
-                    g.setStroke(new BasicStroke(2.2f, BasicStroke.CAP_ROUND, BasicStroke.JOIN_ROUND));
+                    g.setStroke(d.dashed.contains(s)
+                            ? new BasicStroke(2.2f, BasicStroke.CAP_BUTT, BasicStroke.JOIN_ROUND, 10f, new float[]{7f, 5f}, 0f)
+                            : new BasicStroke(2.2f, BasicStroke.CAP_ROUND, BasicStroke.JOIN_ROUND));
                     g.draw(path);
                     g.setStroke(new BasicStroke(1f));
                     for (int i = 0; i < n; i++) {
@@ -4687,10 +5513,10 @@ public class DataChat extends JFrame {
                         "Chart the financial transactions by region",
                         "Monthly revenue by category",
                         "Share of revenue by channel as a pie chart",
-                        "Average amount by category, excluding refunded",
                         "Scatter plot of amount vs units",
-                        "Is discount related to amount?",
-                        "Any unusual transactions?");
+                        "Any unusual transactions?",
+                        "Compare Q1 with Q2 by region",
+                        "Forecast revenue for the next 3 months");
             }
             List<String> out = new ArrayList<>();
             out.add("Describe this data");
@@ -4714,6 +5540,8 @@ public class DataChat extends JFrame {
             if (metric != null && dim != null) out.add("Top 5 " + dim.name + " by " + metric.name);
             if (t.colsOfType(ColType.NUMBER).size() >= 2) out.add("Which numeric columns are related?");
             if (metric != null) out.add("Are there any unusual " + metric.name + " values?");
+            if (metric != null && time != null) out.add("Compare " + metric.name + " this month with last month");
+            if (metric != null && time != null) out.add("Forecast " + metric.name + " for the next 3 months");
             return out;
         }
     }
