@@ -1,5 +1,3 @@
-![Screenshot](screenshot.jpeg)
-
 # DataChat
 
 **Ask your CSV questions in plain English and get an answer plus a chart.**
@@ -19,6 +17,8 @@ DataChat is a single-file Java Swing desktop app with **no external dependencies
 
 - [Quick start](#quick-start)
 - [Using the app](#using-the-app)
+- [Auto-insights](#auto-insights)
+- [PDF report](#pdf-report)
 - [Example questions](#example-questions)
 - [How it works](#how-it-works)
 - [The analysis plan](#the-analysis-plan)
@@ -67,8 +67,8 @@ The key is held in memory only and is never written to disk. Without a key (or w
 
 | Area | What it does |
 |---|---|
-| **Toolbar** | Load CSV, Demo data, API key, model name, Offline mode, and the sample-rows privacy toggle |
-| **Chat (left)** | Your questions and the analyst's plain-English answers, plus clickable example questions |
+| **Toolbar** | Two rows. Top: **Load CSV...**, **Demo data** and **Export PDF report...** (greyed out until you've asked a question). Bottom: Claude API key, model name, Offline mode and the sample-rows privacy toggle |
+| **Chat (left)** | Your questions, the analyst's plain-English answers, the auto-insights for the loaded file, and clickable example questions |
 | **Chart tab** | The chart(s) for the latest answer. Hover for exact values. **Save chart as PNG...** exports it |
 | **Result table tab** | The exact numbers behind the answer. **Save result as CSV...** exports them (see [Exporting results](#exporting-results)) |
 | **Your data tab** | A scrollable view of the loaded CSV |
@@ -86,6 +86,43 @@ The status bar shows the loaded file, row and column counts, and which engine is
 The demo is 2,317 synthetic financial transactions from January to June 2026 with these columns: `TransactionID, Date, Region, Category, Channel, Status, Amount`.
 
 It contains a deliberate story: **March dips** because the North region (store closures) and the Hardware category (supply shortage) sell much less. Ask *"What's driving the drop in March?"* and the analysis should surface exactly those two.
+
+### Auto-insights
+
+As soon as a file loads, DataChat scans it and posts a short list of things worth a closer look in the chat. Each line ends with an **explore** link: click it and the full analysis (table, charts and explanation) runs immediately, with no typing.
+
+| Insight | What triggers it |
+|---|---|
+| **Biggest drop** | The largest period-on-period fall in the main measure, if it is at least 10%. *Explore* runs the driver analysis for exactly those two periods |
+| **Biggest rise** | The same for the largest increase |
+| **Over-indexing segment** | A segment whose share of the measure differs from its share of rows by at least 10 points, for example *"Services is 16% of rows but 33% of Total Amount"*. When the table has no numeric column it flags a segment that makes up at least half of all rows |
+| **Unusual values** | Values above Q3 + 3 x IQR in the main numeric column (shown only if they are under 5% of rows) |
+| **Overall trend** | The change from the first to the last period, if it is at least 5% |
+| **Missing data** | A column that is at least 20% empty |
+
+At most five insights are shown, in that priority order. Details:
+
+- The "main measure" is the first numeric column whose name looks like money (*amount, revenue, sales, price, cost, profit...*), otherwise the first numeric column. With no numeric columns, insights count rows instead.
+- A last month that stops part-way through is ignored when looking for drops, so an incomplete month never shows up as a fake slump.
+- Insights are computed locally, so they never call the API. Clicking *explore* does use Claude for the explanation if a key is set.
+- The insights are also printed in the [PDF report](#pdf-report).
+
+### PDF report
+
+Click **Export PDF report...** (top row of the toolbar, next to Demo data) to save everything you've asked in the current session as a single A4 document. The button is greyed out until you've asked at least one question.
+
+The report contains:
+
+1. A title block with the dataset name, row and column counts, the date, and the column list.
+2. The **Key insights** found on load.
+3. For every question, in order: the question, the plain-English answer, how many rows were used and any filters applied, the chart(s), and the result table (first 25 rows).
+
+Notes:
+
+- Loading a new file starts a fresh session, so the report only covers the current dataset.
+- Charts are embedded as images and tables are real selectable text. Long tables continue across pages with the header repeated.
+- The writer is built into the program (no PDF library), using the standard Helvetica fonts. Characters outside Western European text, such as Chinese, Cyrillic or Arabic, appear as `?`.
+- For the complete table behind an answer, use **Save result as CSV...**.
 
 ### Exporting results
 
@@ -247,6 +284,7 @@ It's good for exploring and for demos. It is keyword-based, so unusual phrasing 
 - **Delimiters** are auto-detected: comma, semicolon, tab or pipe. Quoted fields and escaped quotes are supported.
 - **Encoding:** UTF-8 (BOM handled), with a fallback to Windows-1252 if invalid bytes are found.
 - **Numbers:** currency symbols, thousands separators and percent signs are stripped (`$1,200.50`, `£99`, `12%`), and `(20)` is read as `-20`.
+- **European number formats** are detected per column: `1.234,56`, `12,5`, `1 234,5 €` and `(300,40)` are all read correctly. A value like `1.234.567,89` or `12,5` counts as European evidence and one like `1,234.56` or `1,234,567` as US evidence. Values that could be either (`1,234` or `1.200` on their own) follow the rest of the column, then the rest of the file, and default to US style if there is no evidence anywhere. Dotted dates such as `01.03.2026` are still recognised as dates, not numbers. If an ambiguous column is read the wrong way, give it one unambiguous value (for example `1.200,00`) or reformat the file.
 - **Dates:** auto-detected from `yyyy-MM-dd`, `yyyy-MM`, `yyyy/MM/dd`, `d/M/yyyy` (day first is tried before month first), `M/d/yyyy`, `d-M-yyyy`, `d.M.yyyy`, and `d MMM yyyy` / `MMM d, yyyy` styles. A time portion is ignored.
 - **Type detection:** a column is `NUMBER` or `DATE` if at least 95% of its non-empty values parse. Columns named like IDs (`Customer ID`, `OrderID`, `zip`, `phone`) are kept as text so they aren't summed.
 - Blank headers become `Column N`, and duplicate headers get a numeric suffix.
@@ -258,9 +296,11 @@ It's good for exploring and for demos. It is keyword-based, so unusual phrasing 
 - The data is held in memory, so very large files (millions of rows) will need a bigger heap (`java -Xmx4g ...`).
 - Only one table at a time. There are no joins across files.
 - Day-first dates are assumed when a column is ambiguous (for example `03/04/2026` with no day above 12).
+- Number columns whose every value is ambiguous (only `1,234`-style or `1.200`-style values, in a file with no other evidence) are read as US numbers.
 - Stacked charts and multiple y-axes aren't supported. Multi-series data is drawn as grouped bars or multiple lines.
 - Driver analysis considers text columns (up to 40 distinct values each) and two-way combinations of columns with up to 12 values. Numeric columns aren't used as dimensions.
 - The offline engine can't resolve follow-ups that depend on the previous question.
+- The PDF report uses built-in fonts and only covers Western European characters.
 - A language model can occasionally misread a question. Check the **How it was computed** tab if an answer surprises you.
 
 ---
@@ -276,6 +316,9 @@ It's good for exploring and for demos. It is keyword-based, so unusual phrasing 
 | Dates not recognised | Check the **Your data** tab and the *Describe this data* answer to see the detected type. Reformat the column as `yyyy-MM-dd` |
 | Garbled characters | Re-save the file as UTF-8 |
 | Out of memory | Launch with a larger heap: `java -Xmx4g DataChat.java` |
+| Numbers read 1000x too small or large | A `1.200` or `1,234` column was read in the wrong style. See *European number formats* under [CSV handling](#csv-handling) |
+| No auto-insights appear | Nothing in the data crossed the thresholds (for example fewer than 3 time periods), or the file has no date or numeric columns. Ask questions as usual |
+| `?` characters in the PDF | The text contains characters outside Western European encodings, which the built-in PDF fonts can't show |
 
 ---
 
@@ -293,7 +336,9 @@ Everything lives in `DataChat.java`, organised as nested classes:
 | `LocalPlanner` | Offline natural-language to plan translation, and offline answer text |
 | `Claude` | Anthropic Messages API client plus the planner and explainer system prompts |
 | `Json` | Minimal JSON reader and writer (no libraries) |
-| `ChartPanel` | Java2D chart rendering: bar, horizontal bar, line, pie, with tooltips |
+| `ChartPanel` | Java2D chart rendering: bar, horizontal bar, line, pie, with tooltips. Also used to render charts into the PDF |
+| `Insights`, `Insight` | The on-load scan: biggest drop and rise, over-indexing segments, outliers, trend and missing data. Each insight carries a ready-made `Plan` |
+| `Pdf`, `ReportBuilder` | Minimal PDF 1.4 writer (text, rules, JPEG images, Flate-compressed pages) and the report layout |
 | `DemoData` | Synthetic transactions generator and example questions |
 
 ### Extending it
@@ -301,5 +346,7 @@ Everything lives in `DataChat.java`, organised as nested classes:
 - **New aggregation:** add it to `Acc.get`, `Engine.aggOf` and `measureLabel`, and mention it in `Claude.PLAN_SYSTEM`.
 - **New time bucket:** add a case in `Engine.bucketLabel` and the allowed set in `Engine.bucketOf`.
 - **New chart type:** add a `ChartType`, a paint method in `ChartPanel`, and a rule in `Engine.chartType`.
+- **New insight:** add a method to `Insights` that builds an `Insight(headline, plan)` and call it from `Insights.generate`. The plan runs through the normal engine when the user clicks *explore*.
+- **Report layout:** edit `ReportBuilder.build`; the `Pdf` helper offers `para`, `table`, `image`, `rule` and automatic page breaks.
 - **Different model:** change the **Model** field or set `ANTHROPIC_MODEL`.
 - **Your own demo data:** edit `DemoData.create()` and `DemoData.examplesFor()`.

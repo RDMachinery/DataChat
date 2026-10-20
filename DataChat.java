@@ -1,7 +1,12 @@
+import javax.imageio.IIOImage;
 import javax.imageio.ImageIO;
+import javax.imageio.ImageWriteParam;
+import javax.imageio.ImageWriter;
+import javax.imageio.stream.ImageOutputStream;
 import javax.swing.*;
 import javax.swing.event.DocumentEvent;
 import javax.swing.event.DocumentListener;
+import javax.swing.event.HyperlinkEvent;
 import javax.swing.filechooser.FileNameExtensionFilter;
 import javax.swing.table.AbstractTableModel;
 import javax.swing.table.DefaultTableModel;
@@ -10,6 +15,7 @@ import java.awt.datatransfer.DataFlavor;
 import java.awt.event.MouseEvent;
 import java.awt.geom.*;
 import java.awt.image.BufferedImage;
+import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.IOException;
 import java.net.URI;
@@ -30,6 +36,7 @@ import java.util.List;
 import java.util.function.Function;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+import java.util.zip.DeflaterOutputStream;
 
 /**
  * DataChat - load a CSV, ask questions in plain English, get an answer and a chart.
@@ -94,6 +101,11 @@ public class DataChat extends JFrame {
     private final JTabbedPane tabs = new JTabbedPane();
     private final JButton saveCsvBtn = new JButton("Save result as CSV...");
     private Result lastResult;
+    private final JButton pdfBtn = new JButton("Export PDF report...");
+    private final List<ReportEntry> reportLog = new ArrayList<>();
+    private List<Insight> insights = List.of();
+
+    record ReportEntry(String question, String answer, Result result, String filters) {}
 
     public DataChat() {
         super("DataChat - ask your CSV anything");
@@ -113,19 +125,38 @@ public class DataChat extends JFrame {
         load.addActionListener(e -> chooseFile());
         JButton demo = new JButton("Demo data");
         demo.addActionListener(e -> loadDemo());
-        JPanel bar = new JPanel(new FlowLayout(FlowLayout.LEFT, 8, 6));
-        bar.add(load);
-        bar.add(demo);
-        bar.add(Box.createHorizontalStrut(14));
-        bar.add(new JLabel("Claude API key:"));
-        bar.add(keyField);
-        bar.add(new JLabel("Model:"));
-        bar.add(modelField);
-        bar.add(offlineBox);
-        bar.add(samplesBox);
+        // Two rows so nothing is clipped on narrower windows:
+        //   row 1: file + export actions     row 2: Claude / privacy settings
+        pdfBtn.setEnabled(false);
+        pdfBtn.addActionListener(e -> exportPdf());
+        JPanel row1 = new JPanel(new FlowLayout(FlowLayout.LEFT, 8, 4));
+        row1.add(load);
+        row1.add(demo);
+        row1.add(Box.createHorizontalStrut(14));
+        row1.add(pdfBtn);
+        JPanel row2 = new JPanel(new FlowLayout(FlowLayout.LEFT, 8, 4));
+        row2.add(new JLabel("Claude API key:"));
+        row2.add(keyField);
+        row2.add(new JLabel("Model:"));
+        row2.add(modelField);
+        row2.add(offlineBox);
+        row2.add(samplesBox);
+        JPanel bar = new JPanel(new GridLayout(2, 1));
+        bar.add(row1);
+        bar.add(row2);
 
         // ---- chat column
         chat.setEditable(false);
+        chat.addHyperlinkListener(e -> {
+            if (e.getEventType() != HyperlinkEvent.EventType.ACTIVATED || e.getDescription() == null) return;
+            String d = e.getDescription();
+            if (d.startsWith("insight:")) {
+                try {
+                    runInsight(Integer.parseInt(d.substring(8)));
+                } catch (NumberFormatException ignored) {
+                }
+            }
+        });
         chat.putClientProperty(JEditorPane.HONOR_DISPLAY_PROPERTIES, Boolean.TRUE);
         JScrollPane chatScroll = new JScrollPane(chat);
         examples.setBorder(BorderFactory.createTitledBorder("Try asking"));
@@ -292,6 +323,9 @@ public class DataChat extends JFrame {
         chatHtml.setLength(0);
         lastResult = null;
         saveCsvBtn.setEnabled(false);
+        reportLog.clear();
+        pdfBtn.setEnabled(false);
+        insights = List.of();
         dataTable.setModel(new AbstractTableModel() {
             public int getRowCount() { return t.rows; }
             public int getColumnCount() { return t.cols.size(); }
@@ -315,6 +349,33 @@ public class DataChat extends JFrame {
                 : "Loaded <b>" + esc(t.name) + "</b>: " + String.format(Locale.US, "%,d", t.rows) + " rows. Ask me anything about it.";
         say("Analyst", intro + "<br><br><b>Columns:</b> " + cols, GREEN);
         updateStatus();
+        findInsights(t);
+    }
+
+    // ---------------------------------------------------------------- auto-insights
+    private void findInsights(DataTable t) {
+        new SwingWorker<List<Insight>, Void>() {
+            protected List<Insight> doInBackground() { return Insights.generate(t); }
+
+            protected void done() {
+                try {
+                    if (table != t) return;   // another file was loaded meanwhile
+                    insights = get();
+                    if (insights.isEmpty()) return;
+                    StringBuilder sb = new StringBuilder("I scanned the data and noticed:<br>");
+                    for (int i = 0; i < insights.size(); i++)
+                        sb.append("&bull; ").append(esc(insights.get(i).headline())).append(" &mdash; <a href='insight:").append(i).append("'>explore</a><br>");
+                    say("Auto-insights", sb.toString(), BLUE);
+                } catch (Exception ignored) {
+                }
+            }
+        }.execute();
+    }
+
+    private void runInsight(int i) {
+        if (i < 0 || i >= insights.size() || !input.isEnabled()) return;
+        Insight in = insights.get(i);
+        ask("Tell me more: " + in.headline(), in.plan());
     }
 
     private void rebuildExamples() {
@@ -337,7 +398,9 @@ public class DataChat extends JFrame {
         String answer, warning, error;
     }
 
-    private void ask(String question) {
+    private void ask(String question) { ask(question, null); }
+
+    private void ask(String question, Plan preset) {
         final String q = question == null ? "" : question.trim();
         if (q.isEmpty()) return;
         if (table == null) {
@@ -358,6 +421,26 @@ public class DataChat extends JFrame {
                 Outcome o = new Outcome();
                 Plan plan = null;
                 Result result = null;
+                if (preset != null) {   // an auto-insight: the plan is already known
+                    try {
+                        plan = preset;
+                        result = Engine.execute(t, plan);
+                    } catch (AnalysisException ex) {
+                        o.error = ex.getMessage();
+                        return o;
+                    }
+                    if (claude != null) {
+                        try {
+                            o.answer = claude.narrate(q, plan, result);
+                        } catch (Exception ex) {
+                            o.warning = "Claude could not write the summary (" + ex.getMessage() + "); showing the computed facts instead.";
+                        }
+                    }
+                    if (o.answer == null) o.answer = LocalPlanner.narrate(plan, result);
+                    o.plan = plan;
+                    o.result = result;
+                    return o;
+                }
                 if (claude != null) {
                     try {
                         plan = claude.plan(q, t, history, samples);
@@ -402,6 +485,8 @@ public class DataChat extends JFrame {
                     } else {
                         showResult(o.plan, o.result);
                         turns.add(new String[]{q, Json.write(o.plan.toJson())});
+                        reportLog.add(new ReportEntry(q, o.answer.replace("**", ""), o.result, Engine.describeFilters(o.plan)));
+                        pdfBtn.setEnabled(true);
                         say("Analyst", mdLite(o.answer) + "<br><span style='color:" + GREY + "'>Based on "
                                 + String.format(Locale.US, "%,d", o.result.matched) + " of " + String.format(Locale.US, "%,d", o.result.total)
                                 + " rows.</span>", GREEN);
@@ -468,6 +553,30 @@ public class DataChat extends JFrame {
         }
     }
 
+    private void exportPdf() {
+        if (table == null || reportLog.isEmpty()) return;
+        JFileChooser fc = new JFileChooser(lastDir);
+        fc.setFileFilter(new FileNameExtensionFilter("PDF document", "pdf"));
+        fc.setSelectedFile(new File("datachat-report.pdf"));
+        if (fc.showSaveDialog(this) != JFileChooser.APPROVE_OPTION) return;
+        File f = fc.getSelectedFile();
+        if (!f.getName().toLowerCase().endsWith(".pdf")) f = new File(f.getPath() + ".pdf");
+        if (f.exists() && JOptionPane.showConfirmDialog(this, f.getName() + " already exists. Overwrite it?", "Export PDF report",
+                JOptionPane.YES_NO_OPTION) != JOptionPane.YES_OPTION) return;
+        setCursor(Cursor.getPredefinedCursor(Cursor.WAIT_CURSOR));
+        try {
+            List<String> lines = new ArrayList<>();
+            for (Insight in : insights) lines.add(in.headline());
+            Files.write(f.toPath(), ReportBuilder.build(table, demoLoaded, lines, new ArrayList<>(reportLog)));
+            lastDir = f.getParentFile();
+            say("Analyst", "Exported a " + reportLog.size() + "-question report to <b>" + esc(f.getName()) + "</b>.", GREEN);
+        } catch (IOException | RuntimeException ex) {
+            JOptionPane.showMessageDialog(this, "Could not create the report: " + ex.getMessage());
+        } finally {
+            setCursor(Cursor.getDefaultCursor());
+        }
+    }
+
     private void saveChart() {
         if (chartHost.getWidth() <= 0 || chartHost.getComponentCount() == 0) return;
         JFileChooser fc = new JFileChooser(lastDir);
@@ -513,6 +622,7 @@ public class DataChat extends JFrame {
         LocalDate[] date;
         double nmin = Double.NaN, nmax = Double.NaN, nmean = Double.NaN;
         LocalDate dmin, dmax;
+        boolean euro;   // decimal comma ("1.234,56") detected for this column
         private Set<String> distinct;
 
         Column(String name) { this.name = name; }
@@ -527,12 +637,21 @@ public class DataChat extends JFrame {
 
         int distinctCount() { return distinct().size(); }
 
-        void detect() {
-            int n = 0, nn = 0;
+        void detect() { detect(false); }
+
+        /** preferEuro: when a column's style is ambiguous, follow the rest of the file. */
+        void detect(boolean preferEuro) {
+            type = ColType.TEXT;
+            num = null;
+            date = null;
+            dmin = dmax = null;
+            int n = 0, nn = 0, votes = 0;
+            for (String s : text) if (!s.isEmpty()) votes += numStyle(s);
+            euro = votes > 0 || (votes == 0 && preferEuro);
             for (String s : text) {
                 if (s.isEmpty()) continue;
                 n++;
-                if (!Double.isNaN(parseNum(s))) nn++;
+                if (!Double.isNaN(parseNum(s, euro))) nn++;
             }
             if (n == 0) return;
             if (nn >= 0.95 * n && !idLike(name)) {
@@ -540,7 +659,7 @@ public class DataChat extends JFrame {
                 double sum = 0, mn = Double.POSITIVE_INFINITY, mx = Double.NEGATIVE_INFINITY;
                 int cnt = 0;
                 for (int i = 0; i < text.length; i++) {
-                    num[i] = parseNum(text[i]);
+                    num[i] = parseNum(text[i], euro);
                     if (!Double.isNaN(num[i])) {
                         sum += num[i];
                         cnt++;
@@ -586,7 +705,26 @@ public class DataChat extends JFrame {
 
     static final Pattern NUM = Pattern.compile("[-+]?(\\d+\\.?\\d*|\\.\\d+)([eE][-+]?\\d+)?");
 
-    static double parseNum(String s) {
+    static double parseNum(String s) { return parseNum(s, false); }
+
+    /**
+     * Vote on a value's number style: +1 = European ("1.234,56", "12,5"), -1 = US ("1,234.56", "1,234,567"),
+     * 0 = ambiguous or not a number ("1,234", "12.5", "7").
+     */
+    static final Pattern EU_GROUPED = Pattern.compile("\\d{1,3}(\\.\\d{3})+(,\\d+)?");
+    static final Pattern US_GROUPED = Pattern.compile("\\d{1,3}(,\\d{3})+(\\.\\d+)?");
+
+    static int numStyle(String s) {
+        String t = s.replaceAll("[\u00a3$\u20ac%\\s\u00a0()+\\-]", "");
+        if (t.isEmpty() || !t.matches("[0-9.,]+")) return 0;
+        if (EU_GROUPED.matcher(t).matches()) return t.contains(",") || t.indexOf('.') != t.lastIndexOf('.') ? 1 : 0;   // "1.234" alone is ambiguous
+        if (US_GROUPED.matcher(t).matches()) return t.contains(".") || t.indexOf(',') != t.lastIndexOf(',') ? -1 : 0;   // "1,234" alone is ambiguous
+        Matcher m = Pattern.compile("(\\d+),(\\d+)").matcher(t);
+        if (m.matches() && (m.group(2).length() != 3 || m.group(1).length() > 3)) return 1;   // "12,5", "3,14", "1234,567"
+        return 0;
+    }
+
+    static double parseNum(String s, boolean euro) {
         if (s == null) return Double.NaN;
         s = s.trim();
         if (s.isEmpty()) return Double.NaN;
@@ -595,7 +733,16 @@ public class DataChat extends JFrame {
             neg = true;
             s = s.substring(1, s.length() - 1);
         }
-        s = s.replaceAll("[\u00a3$\u20ac,\\s%]", "");
+        s = s.replaceAll("[\u00a3$\u20ac%\\s\u00a0]", "");
+        String body = s.replaceFirst("^[-+]", "");
+        if (euro) {
+            if (body.contains(".") && !EU_GROUPED.matcher(body).matches() && !body.matches("\\d+\\.\\d+")) return Double.NaN;   // e.g. a dd.MM.yyyy date
+            if (body.matches("\\d+\\.\\d+") && !EU_GROUPED.matcher(body).matches()) body = body.replace('.', ',');           // stray US-style decimal
+            s = (s.startsWith("-") ? "-" : "") + body.replace(".", "").replace(",", ".");
+        } else {
+            if (body.contains(",") && !US_GROUPED.matcher(body).matches()) return Double.NaN;
+            s = s.replace(",", "");
+        }
         if (s.isEmpty() || !NUM.matcher(s).matches()) return Double.NaN;
         try {
             double v = Double.parseDouble(s);
@@ -681,6 +828,9 @@ public class DataChat extends JFrame {
                 col.detect();
                 t.cols.add(col);
             }
+            boolean fileEuro = false;
+            for (Column c : t.cols) if (c.type == ColType.NUMBER && c.euro) fileEuro = true;
+            if (fileEuro) for (Column c : t.cols) if (c.type != ColType.DATE && !c.euro) c.detect(true);   // e.g. "1.200" in a European file
             return t;
         }
 
@@ -2693,6 +2843,507 @@ public class DataChat extends JFrame {
             if (metric != null && dim2 != null) out.add("Average " + metric.name + " by " + dim2.name);
             if (metric != null && dim != null) out.add("Top 5 " + dim.name + " by " + metric.name);
             return out;
+        }
+    }
+
+    // =====================================================================================
+    //  Auto-insights: a quick scan of a freshly loaded table for things worth a closer look
+    // =====================================================================================
+    record Insight(String headline, Plan plan) {}
+
+    static final class Insights {
+        static Column defaultMetric(DataTable t) {
+            List<Column> nums = t.colsOfType(ColType.NUMBER);
+            if (nums.isEmpty()) return null;
+            for (Column c : nums)
+                if (c.name.toLowerCase(Locale.ROOT).matches(".*(amount|revenue|sales|total|price|value|cost|profit|income|spend|payment).*")) return c;
+            return nums.get(0);
+        }
+
+        static String pct(double frac) { return String.format(Locale.US, "%.1f%%", Math.abs(frac) * 100); }
+
+        static List<Insight> generate(DataTable t) {
+            List<Insight> drops = new ArrayList<>(), rises = new ArrayList<>(), conc = new ArrayList<>(),
+                    outl = new ArrayList<>(), trend = new ArrayList<>(), missing = new ArrayList<>();
+            Column m = defaultMetric(t);
+            String agg = m == null ? "count" : "sum";
+            String measure = Engine.measureLabel(agg, m);
+            boolean[] all = new boolean[t.rows];
+            Arrays.fill(all, true);
+            try {
+                timeInsights(t, m, agg, measure, all, drops, rises, trend);
+                concentration(t, m, agg, measure, conc);
+                outliers(t, m, outl);
+                missingData(t, missing);
+            } catch (RuntimeException ignored) {
+                // insights are a bonus: never let them break loading
+            }
+            List<Insight> out = new ArrayList<>();
+            for (List<Insight> group : List.of(drops, rises, conc, outl, trend, missing)) out.addAll(group);
+            return out.size() > 5 ? new ArrayList<>(out.subList(0, 5)) : out;
+        }
+
+        private static void timeInsights(DataTable t, Column m, String agg, String measure, boolean[] all,
+                                         List<Insight> drops, List<Insight> rises, List<Insight> trend) {
+            Column time = t.firstOfType(ColType.DATE);
+            if (time == null) return;
+            String bucket = Engine.bucketOf(null, time, all);
+            TreeMap<String, Acc> byB = new TreeMap<>();
+            for (int i = 0; i < t.rows; i++) {
+                if (time.date[i] == null) continue;
+                double v = 1;
+                if (m != null) {
+                    v = m.num[i];
+                    if (Double.isNaN(v)) continue;
+                }
+                byB.computeIfAbsent(Engine.bucketLabel(time.date[i], bucket), k -> new Acc()).add(v, false);
+            }
+            List<String> labels = new ArrayList<>(byB.keySet());
+            // a month that stops part-way would look like a fake drop
+            if (bucket.equals("month") && time.dmax != null && time.dmax.getDayOfMonth() < time.dmax.lengthOfMonth() && !labels.isEmpty()
+                    && labels.get(labels.size() - 1).equals(Engine.bucketLabel(time.dmax, "month")))
+                labels.remove(labels.size() - 1);
+            if (labels.size() < 3) return;
+            double[] v = new double[labels.size()];
+            for (int i = 0; i < v.length; i++) v[i] = byB.get(labels.get(i)).get(agg);
+            int worst = -1, best = -1;
+            double wp = 0, bp = 0;
+            for (int i = 1; i < v.length; i++) {
+                if (v[i - 1] == 0) continue;
+                double p = (v[i] - v[i - 1]) / Math.abs(v[i - 1]);
+                if (p < wp) { wp = p; worst = i; }
+                if (p > bp) { bp = p; best = i; }
+            }
+            if (worst > 0 && wp <= -0.10)
+                drops.add(new Insight(measure + " fell " + pct(wp) + " from " + labels.get(worst - 1) + " to " + labels.get(worst),
+                        driverPlan(time, bucket, m, agg, labels.get(worst - 1), labels.get(worst), "drop")));
+            if (best > 0 && bp >= 0.10)
+                rises.add(new Insight(measure + " rose " + pct(bp) + " from " + labels.get(best - 1) + " to " + labels.get(best),
+                        driverPlan(time, bucket, m, agg, labels.get(best - 1), labels.get(best), "rise")));
+            if (v[0] != 0) {
+                double p = (v[v.length - 1] - v[0]) / Math.abs(v[0]);
+                if (Math.abs(p) >= 0.05) {
+                    Plan pl = new Plan();
+                    pl.metric = m == null ? null : m.name;
+                    pl.agg = agg;
+                    pl.x = time.name;
+                    pl.bucket = bucket;
+                    pl.chart = "line";
+                    trend.add(new Insight("Overall, " + measure + " is " + (p > 0 ? "up " : "down ") + pct(p) + " from " + labels.get(0) + " to " + labels.get(labels.size() - 1), pl));
+                }
+            }
+        }
+
+        private static Plan driverPlan(Column time, String bucket, Column m, String agg, String from, String to, String dir) {
+            Plan p = new Plan();
+            p.intent = "drivers";
+            p.metric = m == null ? null : m.name;
+            p.agg = agg;
+            p.x = time.name;
+            p.bucket = bucket;
+            p.from = from;
+            p.to = to;
+            p.direction = dir;
+            return p;
+        }
+
+        /** A segment whose share of the measure differs a lot from its share of rows (or, for counts, a dominant segment). */
+        private static void concentration(DataTable t, Column m, String agg, String measure, List<Insight> out) {
+            Insight best = null;
+            double bestGap = 0;
+            for (Column c : t.cols) {
+                int dc = c.type == ColType.TEXT ? c.distinctCount() : 0;
+                if (dc < 3 || dc > 30 || dc > 0.5 * t.rows) continue;
+                Map<String, Double> tot = new HashMap<>();
+                Map<String, Integer> cnt = new HashMap<>();
+                double sum = 0;
+                int rows = 0;
+                boolean negative = false;
+                for (int i = 0; i < t.rows; i++) {
+                    String k = c.text[i];
+                    if (k == null || k.isBlank()) continue;
+                    double v = m == null ? 1 : m.num[i];
+                    if (Double.isNaN(v)) continue;
+                    if (v < 0) negative = true;
+                    tot.merge(k.trim(), v, Double::sum);
+                    cnt.merge(k.trim(), 1, Integer::sum);
+                    sum += v;
+                    rows++;
+                }
+                if (negative || sum <= 0 || rows == 0) continue;
+                for (var e : tot.entrySet()) {
+                    double vs = e.getValue() / sum, rs = cnt.get(e.getKey()) / (double) rows;
+                    double gap = m == null ? (vs >= 0.5 ? vs : 0) : vs - rs;
+                    if (gap < (m == null ? 0.5 : 0.10) || vs < 0.10 || gap <= bestGap) continue;
+                    bestGap = gap;
+                    Plan p = new Plan();
+                    p.metric = m == null ? null : m.name;
+                    p.agg = agg;
+                    p.x = c.name;
+                    p.sort = "desc";
+                    String pc = String.format(Locale.US, "%.0f%%", vs * 100);
+                    best = new Insight(m == null
+                            ? e.getKey() + " makes up " + pc + " of all rows (by " + c.name + ")"
+                            : e.getKey() + " is " + String.format(Locale.US, "%.0f%%", rs * 100) + " of rows but " + pc + " of " + measure + " (by " + c.name + ")", p);
+                }
+            }
+            if (best != null) out.add(best);
+        }
+
+        private static void outliers(DataTable t, Column m, List<Insight> out) {
+            if (m == null) return;
+            double[] v = Arrays.stream(m.num).filter(d -> !Double.isNaN(d)).sorted().toArray();
+            int n = v.length;
+            if (n < 20) return;
+            double q1 = v[n / 4], q3 = v[(3 * n) / 4], iqr = q3 - q1;
+            if (iqr <= 0) return;
+            double fence = q3 + 3 * iqr;
+            int count = 0;
+            for (double d : v) if (d > fence) count++;
+            if (count == 0 || count > 0.05 * n) return;
+            Plan p = new Plan();
+            p.intent = "rows";
+            p.metric = m.name;
+            p.sort = "desc";
+            p.limit = Math.min(count, 20);
+            p.chart = "none";
+            out.add(new Insight(count + " unusually large " + m.name + " value" + (count == 1 ? "" : "s") + " (max " + Fmt.full(v[n - 1]) + " vs median " + Fmt.full(v[n / 2]) + ")", p));
+        }
+
+        private static void missingData(DataTable t, List<Insight> out) {
+            Column worst = null;
+            double share = 0;
+            for (Column c : t.cols) {
+                int blank = 0;
+                for (String s : c.text) if (s == null || s.isBlank()) blank++;
+                double f = blank / (double) t.rows;
+                if (f >= 0.20 && f > share) {
+                    share = f;
+                    worst = c;
+                }
+            }
+            if (worst == null) return;
+            Plan p = new Plan();
+            p.intent = "describe";
+            out.add(new Insight(worst.name + " is " + String.format(Locale.US, "%.0f%%", share * 100) + " empty, so results involving it may be incomplete", p));
+        }
+    }
+
+    // =====================================================================================
+    //  PDF report: a tiny dependency-free PDF writer (Helvetica text, vector rules, JPEG charts)
+    // =====================================================================================
+    static final class Pdf {
+        static final double W = 595.28, H = 841.89, M = 48;   // A4 in points, margin
+        // Helvetica glyph widths (1/1000 em) for ASCII 32..126
+        static final int[] REG = {278, 278, 355, 556, 556, 889, 667, 191, 333, 333, 389, 584, 278, 333, 278, 278,
+                556, 556, 556, 556, 556, 556, 556, 556, 556, 556, 278, 278, 584, 584, 584, 556,
+                1015, 667, 667, 722, 722, 667, 611, 778, 722, 278, 500, 667, 556, 833, 722, 778,
+                667, 778, 722, 667, 611, 722, 667, 944, 667, 667, 611, 278, 278, 278, 469, 556,
+                333, 556, 556, 500, 556, 556, 278, 556, 556, 222, 222, 500, 222, 833, 556, 556,
+                556, 556, 333, 500, 278, 556, 500, 722, 500, 500, 500, 334, 260, 334, 584};
+        static final int[] BOLD = {278, 333, 474, 556, 556, 889, 722, 238, 333, 333, 389, 584, 278, 333, 278, 278,
+                556, 556, 556, 556, 556, 556, 556, 556, 556, 556, 333, 333, 584, 584, 584, 611,
+                975, 722, 722, 722, 722, 667, 611, 778, 722, 278, 556, 722, 611, 833, 722, 778,
+                667, 778, 722, 667, 611, 722, 667, 944, 667, 667, 611, 333, 278, 333, 584, 556,
+                333, 556, 611, 556, 611, 556, 333, 611, 611, 278, 278, 556, 278, 889, 611, 611,
+                611, 611, 389, 556, 333, 611, 556, 778, 556, 556, 500, 389, 280, 389, 584};
+
+        final List<StringBuilder> pages = new ArrayList<>();
+        final List<List<Integer>> pageImgs = new ArrayList<>();
+        final List<byte[]> jpegs = new ArrayList<>();
+        final List<int[]> dims = new ArrayList<>();
+        StringBuilder cur;
+        double y;   // distance of the next line from the top of the page
+
+        Pdf() { newPage(); }
+
+        static String n(double v) { return String.format(Locale.US, "%.2f", v); }
+
+        static double width(String s, boolean bold, double size) {
+            int[] w = bold ? BOLD : REG;
+            double sum = 0;
+            for (int i = 0; i < s.length(); i++) {
+                char c = s.charAt(i);
+                sum += c >= 32 && c <= 126 ? w[c - 32] : 556;
+            }
+            return sum * size / 1000.0;
+        }
+
+        static String esc(String s) {
+            byte[] b = s.replaceAll("\\p{Cntrl}", " ").getBytes(Charset.forName("windows-1252"));   // unmappable characters become '?'
+            StringBuilder sb = new StringBuilder();
+            for (byte x : b) {
+                int c = x & 0xff;
+                if (c == '(' || c == ')' || c == '\\') sb.append('\\').append((char) c);
+                else if (c >= 32 && c < 127) sb.append((char) c);
+                else sb.append(String.format("\\%03o", c));
+            }
+            return sb.toString();
+        }
+
+        void color(Color c, String op) {
+            cur.append(n(c.getRed() / 255.0)).append(' ').append(n(c.getGreen() / 255.0)).append(' ').append(n(c.getBlue() / 255.0)).append(' ').append(op).append(' ');
+        }
+
+        void newPage() {
+            cur = new StringBuilder();
+            pages.add(cur);
+            pageImgs.add(new ArrayList<>());
+            y = M;
+            String foot = "DataChat report  -  page " + pages.size();
+            text((W - width(foot, false, 8)) / 2, H - 26, false, 8, foot, new Color(0x888888));
+        }
+
+        void ensure(double h) { if (y + h > H - M) newPage(); }
+
+        void gap(double h) { y += h; }
+
+        void text(double x, double baseline, boolean bold, double size, String s, Color c) {
+            cur.append("BT /F").append(bold ? 2 : 1).append(' ').append(n(size)).append(" Tf ");
+            color(c, "rg");
+            cur.append(n(x)).append(' ').append(n(H - baseline)).append(" Td (").append(esc(s)).append(") Tj ET\n");
+        }
+
+        void rect(double x, double top, double w, double h, Color c) {
+            color(c, "rg");
+            cur.append(n(x)).append(' ').append(n(H - top - h)).append(' ').append(n(w)).append(' ').append(n(h)).append(" re f\n");
+        }
+
+        void rule(double x1, double x2, double top, Color c, double lw) {
+            color(c, "RG");
+            cur.append(n(lw)).append(" w ").append(n(x1)).append(' ').append(n(H - top)).append(" m ").append(n(x2)).append(' ').append(n(H - top)).append(" l S\n");
+        }
+
+        static List<String> wrap(String s, boolean bold, double size, double maxW) {
+            List<String> lines = new ArrayList<>();
+            for (String para : s.split("\n")) {
+                StringBuilder line = new StringBuilder();
+                for (String word : para.trim().split("\\s+")) {
+                    while (width(word, bold, size) > maxW && word.length() > 1) {   // very long token: hard-break
+                        int k = word.length();
+                        while (k > 1 && width(word.substring(0, k), bold, size) > maxW) k--;
+                        if (line.length() > 0) { lines.add(line.toString()); line.setLength(0); }
+                        lines.add(word.substring(0, k));
+                        word = word.substring(k);
+                    }
+                    String test = line.length() == 0 ? word : line + " " + word;
+                    if (width(test, bold, size) <= maxW || line.length() == 0) {
+                        line.setLength(0);
+                        line.append(test);
+                    } else {
+                        lines.add(line.toString());
+                        line.setLength(0);
+                        line.append(word);
+                    }
+                }
+                lines.add(line.toString());
+            }
+            return lines;
+        }
+
+        void para(String s, boolean bold, double size, Color c, double indent) {
+            double lh = size * 1.38;
+            for (String line : wrap(s, bold, size, W - 2 * M - indent)) {
+                ensure(lh);
+                text(M + indent, y + size, bold, size, line, c);
+                y += lh;
+            }
+        }
+
+        static byte[] jpeg(BufferedImage img) throws IOException {
+            ImageWriter wr = ImageIO.getImageWritersByFormatName("jpeg").next();
+            ImageWriteParam p = wr.getDefaultWriteParam();
+            p.setCompressionMode(ImageWriteParam.MODE_EXPLICIT);
+            p.setCompressionQuality(0.92f);
+            ByteArrayOutputStream bo = new ByteArrayOutputStream();
+            try (ImageOutputStream ios = ImageIO.createImageOutputStream(bo)) {
+                wr.setOutput(ios);
+                wr.write(null, new IIOImage(img, null, null), p);
+            } finally {
+                wr.dispose();
+            }
+            return bo.toByteArray();
+        }
+
+        /** Draws an image scaled to the page width (or less) at the current position. */
+        void image(BufferedImage img) throws IOException {
+            double w = W - 2 * M, h = w * img.getHeight() / img.getWidth();
+            ensure(h + 6);
+            jpegs.add(jpeg(img));
+            dims.add(new int[]{img.getWidth(), img.getHeight()});
+            int idx = jpegs.size() - 1;
+            pageImgs.get(pageImgs.size() - 1).add(idx);
+            cur.append("q ").append(n(w)).append(" 0 0 ").append(n(h)).append(' ').append(n(M)).append(' ').append(n(H - y - h)).append(" cm /Im").append(idx).append(" Do Q\n");
+            y += h + 6;
+        }
+
+        static String fit(String s, boolean bold, double size, double maxW) {
+            if (width(s, bold, size) <= maxW) return s;
+            while (s.length() > 1 && width(s + "...", bold, size) > maxW) s = s.substring(0, s.length() - 1);
+            return s + "...";
+        }
+
+        void table(List<String> headers, List<String[]> rows, int maxRows) {
+            int nc = headers.size();
+            if (nc == 0) return;
+            double size = nc > 8 ? 6.5 : 8, rowH = size + 6, avail = W - 2 * M;
+            int shown = Math.min(rows.size(), maxRows);
+            double[] cw = new double[nc];
+            double total = 0;
+            for (int c = 0; c < nc; c++) {
+                double w = width(headers.get(c), true, size);
+                for (int r = 0; r < Math.min(shown, 40); r++) w = Math.max(w, width(rows.get(r)[c], false, size));
+                cw[c] = w + 10;
+                total += cw[c];
+            }
+            double f = total > avail ? avail / total : 1;
+            for (int c = 0; c < nc; c++) cw[c] *= f;
+            ensure(rowH * 2);
+            tableHeader(headers, cw, size, rowH);
+            for (int r = 0; r < shown; r++) {
+                if (y + rowH > H - M) {
+                    newPage();
+                    tableHeader(headers, cw, size, rowH);
+                }
+                double x = M;
+                for (int c = 0; c < nc; c++) {
+                    String cell = fit(rows.get(r)[c] == null ? "" : rows.get(r)[c], false, size, cw[c] - 6);
+                    boolean num = cell.matches("[-+]?[\\d,]*\\.?\\d+%?");
+                    text(num ? x + cw[c] - 3 - width(cell, false, size) : x + 3, y + size + 2.5, false, size, cell, new Color(0x222222));
+                    x += cw[c];
+                }
+                y += rowH;
+                rule(M, M + avail, y, new Color(0xE3E3E3), 0.4);
+            }
+            if (rows.size() > shown) {
+                gap(3);
+                para("Showing the first " + shown + " of " + rows.size() + " rows. Use \"Save result as CSV\" in the app for the full table.", false, 8, new Color(0x777777), 0);
+            }
+        }
+
+        private void tableHeader(List<String> headers, double[] cw, double size, double rowH) {
+            rect(M, y, W - 2 * M, rowH, new Color(0xEEEEEE));
+            double x = M;
+            for (int c = 0; c < headers.size(); c++) {
+                String h = fit(headers.get(c), true, size, cw[c] - 6);
+                boolean right = false;
+                text(right ? x + cw[c] - 3 - width(h, true, size) : x + 3, y + size + 2.5, true, size, h, new Color(0x222222));
+                x += cw[c];
+            }
+            y += rowH;
+        }
+
+        byte[] build() throws IOException {
+            ByteArrayOutputStream out = new ByteArrayOutputStream();
+            int nJ = jpegs.size(), np = pages.size(), base = 5 + nJ, nObj = 4 + nJ + 2 * np;
+            long[] off = new long[nObj + 1];
+            out.write("%PDF-1.4\n%\u00e2\u00e3\u00cf\u00d3\n".getBytes(StandardCharsets.ISO_8859_1));
+            StringBuilder kids = new StringBuilder();
+            for (int k = 0; k < np; k++) kids.append(base + 2 * k + 1).append(" 0 R ");
+            plain(out, off, 1, "<< /Type /Catalog /Pages 2 0 R >>");
+            plain(out, off, 2, "<< /Type /Pages /Count " + np + " /Kids [" + kids + "] >>");
+            plain(out, off, 3, "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>");
+            plain(out, off, 4, "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold /Encoding /WinAnsiEncoding >>");
+            for (int i = 0; i < nJ; i++)
+                stream(out, off, 5 + i, "/Type /XObject /Subtype /Image /Width " + dims.get(i)[0] + " /Height " + dims.get(i)[1]
+                        + " /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /DCTDecode", jpegs.get(i));
+            for (int k = 0; k < np; k++) {
+                ByteArrayOutputStream z = new ByteArrayOutputStream();
+                try (DeflaterOutputStream d = new DeflaterOutputStream(z)) {
+                    d.write(pages.get(k).toString().getBytes(StandardCharsets.ISO_8859_1));
+                }
+                stream(out, off, base + 2 * k, "/Filter /FlateDecode", z.toByteArray());
+                StringBuilder xo = new StringBuilder();
+                for (int idx : pageImgs.get(k)) xo.append("/Im").append(idx).append(' ').append(5 + idx).append(" 0 R ");
+                plain(out, off, base + 2 * k + 1, "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 " + n(W) + " " + n(H)
+                        + "] /Resources << /Font << /F1 3 0 R /F2 4 0 R >> /XObject << " + xo + ">> >> /Contents " + (base + 2 * k) + " 0 R >>");
+            }
+            long xref = out.size();
+            out.write(("xref\n0 " + (nObj + 1) + "\n0000000000 65535 f \n").getBytes(StandardCharsets.ISO_8859_1));
+            for (int id = 1; id <= nObj; id++) out.write(String.format("%010d 00000 n \n", off[id]).getBytes(StandardCharsets.ISO_8859_1));
+            out.write(("trailer\n<< /Size " + (nObj + 1) + " /Root 1 0 R >>\nstartxref\n" + xref + "\n%%EOF\n").getBytes(StandardCharsets.ISO_8859_1));
+            return out.toByteArray();
+        }
+
+        private static void plain(ByteArrayOutputStream out, long[] off, int id, String body) throws IOException {
+            off[id] = out.size();
+            out.write((id + " 0 obj\n" + body + "\nendobj\n").getBytes(StandardCharsets.ISO_8859_1));
+        }
+
+        private static void stream(ByteArrayOutputStream out, long[] off, int id, String dict, byte[] data) throws IOException {
+            off[id] = out.size();
+            out.write((id + " 0 obj\n<< " + dict + " /Length " + data.length + " >>\nstream\n").getBytes(StandardCharsets.ISO_8859_1));
+            out.write(data);
+            out.write("\nendstream\nendobj\n".getBytes(StandardCharsets.ISO_8859_1));
+        }
+    }
+
+    static final class ReportBuilder {
+        static byte[] build(DataTable t, boolean demo, List<String> insightLines, List<ReportEntry> log) throws IOException {
+            Color ink = new Color(0x222222), grey = new Color(0x777777), blue = new Color(0x1a5fb4);
+            Pdf p = new Pdf();
+            p.para("DataChat report", true, 24, ink, 0);
+            p.gap(4);
+            p.para("Dataset: " + t.name + (demo ? " (demo data)" : "") + "  -  " + String.format(Locale.US, "%,d", t.rows) + " rows x " + t.cols.size() + " columns", false, 10, grey, 0);
+            p.para("Generated: " + LocalDate.now(), false, 10, grey, 0);
+            StringBuilder cols = new StringBuilder("Columns: ");
+            for (int i = 0; i < t.cols.size(); i++)
+                cols.append(i > 0 ? ", " : "").append(t.cols.get(i).name).append(" (").append(t.cols.get(i).type.name().toLowerCase()).append(")");
+            p.para(cols.toString(), false, 9, grey, 0);
+            if (!insightLines.isEmpty()) {
+                p.gap(12);
+                p.para("Key insights", true, 14, ink, 0);
+                p.gap(2);
+                for (String line : insightLines) p.para("-  " + line, false, 10, ink, 8);
+            }
+            if (log.isEmpty()) {
+                p.gap(14);
+                p.para("No questions were asked in this session.", false, 10, ink, 0);
+            }
+            int qn = 0;
+            for (ReportEntry e : log) {
+                qn++;
+                p.gap(16);
+                double need = 130;   // heading + answer text, plus the first chart so they are not split across pages
+                if (!e.result().charts.isEmpty()) {
+                    ChartData c0 = e.result().charts.get(0);
+                    need += (Pdf.W - 2 * Pdf.M) * chartHeight(c0) / 1000.0;
+                }
+                p.ensure(Math.min(need, Pdf.H - 2 * Pdf.M - 10));
+                p.rule(Pdf.M, Pdf.W - Pdf.M, p.y, new Color(0xCCCCCC), 0.6);
+                p.gap(10);
+                p.para("Q" + qn + ".  " + e.question(), true, 12, blue, 0);
+                p.gap(4);
+                p.para(e.answer(), false, 10, ink, 0);
+                Result r = e.result();
+                p.gap(2);
+                p.para("Based on " + String.format(Locale.US, "%,d", r.matched) + " of " + String.format(Locale.US, "%,d", r.total) + " rows"
+                        + (e.filters().isEmpty() ? "" : "  |  filters: " + e.filters()), false, 8, grey, 0);
+                p.gap(6);
+                for (ChartData cd : r.charts) p.image(render(cd));
+                if (!r.rows.isEmpty() && !r.headers.isEmpty()) {
+                    p.gap(2);
+                    p.table(r.headers, r.rows, 25);
+                }
+            }
+            return p.build();
+        }
+
+        static int chartHeight(ChartData cd) {
+            return cd.type == ChartType.HBAR ? Math.max(340, Math.min(760, 120 + 30 * cd.labels.size())) : 420;
+        }
+
+        static BufferedImage render(ChartData cd) {
+            int w = 1000, h = chartHeight(cd);
+            ChartPanel cp = new ChartPanel(cd);
+            cp.setSize(w, h);
+            BufferedImage img = new BufferedImage(w, h, BufferedImage.TYPE_INT_RGB);
+            Graphics2D g = img.createGraphics();
+            g.setColor(Color.WHITE);
+            g.fillRect(0, 0, w, h);
+            cp.print(g);
+            g.dispose();
+            return img;
         }
     }
 }
