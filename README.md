@@ -2,6 +2,7 @@
 
 # DataChat
 
+
 **Ask your CSV questions in plain English and get an answer plus a chart.**
 
 No pivot tables, no remembering which formula does what. Load a CSV and type things like:
