@@ -1,3 +1,5 @@
+![Screenshot](screenshot.jpeg)
+
 # DataChat
 
 **Ask your CSV questions in plain English and get an answer plus a chart.**
