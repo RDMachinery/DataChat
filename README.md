@@ -1,7 +1,3 @@
-![Splash screen](splash.jpeg)
-![Screenshot1](screenshot.jpeg)
-![Screenshot2](screenshot2.jpeg)
-
 # DataChat
 
 **Ask your CSV or Excel data questions in plain English and get an answer plus a chart.**
@@ -27,6 +23,8 @@ DataChat is a single-file Java Swing desktop app with **no external dependencies
 - [Click a chart to drill down](#click-a-chart-to-drill-down)
 - [Correlation and scatter plots](#correlation-and-scatter-plots)
 - [Unusual values and outliers](#unusual-values-and-outliers)
+- [Unique counts and "per customer" questions](#unique-counts-and-per-customer-questions)
+- [Running totals, percent of total, growth and moving averages](#running-totals-percent-of-total-growth-and-moving-averages)
 - [Cleaning data](#cleaning-data)
 - [Calculated columns](#calculated-columns)
 - [Joining two files or sheets](#joining-two-files-or-sheets)
@@ -101,7 +99,7 @@ The status bar shows the loaded file, row and column counts, and which engine is
 
 ### Demo data
 
-The demo is 2,317 synthetic financial transactions from January to June 2026 with these columns: `TransactionID, Date, Region, Category, Channel, Status, Amount, Units, Discount (%)`. `Units` and `Discount (%)` are there so you can try the correlation and scatter-plot questions.
+The demo is 2,317 synthetic financial transactions from January to June 2026 with these columns: `TransactionID, Date, Region, Category, Channel, Status, Amount, Units, Discount (%), CustomerID, ShipDate`. `Units` and `Discount (%)` are there so you can try the correlation and scatter-plot questions; `CustomerID` (about 400 customers, a few of them buying much more often than the rest) is for [per-customer questions](#unique-counts-and-per-customer-questions); `ShipDate` (1 to 15 days after `Date`) is for [date formulas](#calculated-columns).
 
 It contains a deliberate story: **March dips** because the North region (store closures) and the Hardware category (supply shortage) sell much less. Ask *"What's driving the drop in March?"* and the analysis should surface exactly those two.
 
@@ -207,6 +205,53 @@ Follow-ups work: after *"any unusual transactions?"*, try *"only North"*, *"now 
 
 Things to keep in mind: unusual does not mean wrong, it means different from the rest, so check each one. The cut-off is fixed at 3.5. Outliers are judged one column at a time, so a combination that is odd only when two columns are read together (a huge discount on a tiny order, say) won't be found.
 
+### Unique counts and "per customer" questions
+
+Some questions are not about rows at all but about the *things* in them: customers, products, stores. DataChat treats a text column that identifies things (a name like `CustomerID`, `Product`, `Account`, or any column with many repeating values) as an *entity*, and understands these:
+
+| Ask | What it does |
+|---|---|
+| `How many unique customers do we have?` | Counts the different values of the column (unique values of any column work: *"how many different regions"*) |
+| `Unique customers by month` / `... per region` | Unique counts per group. The same customer in two months counts once in each month |
+| `Average spend per customer` | Totals each customer first, then averages those totals. Also `median`, `highest`, `lowest` |
+| `Orders per customer` | Counts each customer's rows first, then averages (*"most orders by a customer"*, *"median orders per customer"*) |
+| `Average order value per customer` | Averages each customer's own order amounts, then averages those |
+| `Top 10 customers by revenue` / `Bottom 5 customers by revenue` | Ranks the customers themselves, with a bar chart of the top 15 and each one's share of the total |
+| `How many customers spent over 3000?` | Counts the customers whose total passes the line, and says how many of all customers that is |
+| `Customers with more than 5 orders` | Lists them (also `ordered more than once`, `only ordered once`) |
+
+Two things worth knowing:
+
+- **Per customer is a two-stage calculation.** *"Average spend per customer"* is not the average transaction. It is the average of each customer's total. The answer states this ("The average total Amount per CustomerID is ... across 395 CustomerID values") together with the median and range, because a few big customers can pull the average far above the typical one.
+- **Rows are not customers.** *"How many customers bought in March"* counts different customers, not transactions. Ask *"How many transactions in March"* for rows.
+
+With breakdowns (*"average spend per customer by region"*) each customer is totalled *within* each region first, so a customer who buys in three regions appears in all three.
+
+If the table has no column that identifies customers (or any entity), the answer says so and lists the columns it could use. In the [plan](#the-analysis-plan) these are the `entities` intent, the `per`, `inner` and `having` fields, and the `distinct` aggregation.
+
+### Running totals, percent of total, growth and moving averages
+
+Ask for a calculation on top of a normal grouped answer:
+
+| Ask | You get |
+|---|---|
+| `Cumulative revenue by month` / `running total of amount by month` | Line of the running total, with the point where half the total had built up |
+| `Pareto of revenue by region` / `cumulative amount by region` | For categories: largest first, with the cumulative share of the total and how many values it takes to pass 80% |
+| `Percent of total amount by region` | Each group as a percentage of the grand total |
+| `Share of total revenue by month and region` | Every month split into groups that add up to 100% (a 100% stacked chart) |
+| `Revenue growth by month` | Percent change on the previous period (green and red bars), with the average, best and worst period. Also `growth by quarter`, `percent change by week`, `month over month growth` |
+| `Revenue by month, 3 month moving average` | The actual line with a smoothed line over it. Also `7 day moving average`, `rolling average of amount by month` (default window: 3 periods, 7 for days) |
+
+As follow-ups: `make it cumulative`, `as percent of total`, `add a 2 month moving average`, and `show the actual values` to go back.
+
+Notes:
+
+- A running total only makes sense for totals and counts. For averages and unique counts the answer keeps the plain values and says why. Percent of total also needs non-negative values.
+- Growth and moving averages need a date on the x-axis and enough periods (a window of 3 needs at least 4 months). Otherwise the answer says what is missing and shows the plain values.
+- Growth is blank for the first period, and for any period after a zero.
+- *"Month over month growth"* gives the whole series. To compare exactly two periods and see which segments moved, use [Comparing two periods](#comparing-two-periods) (*"compare February and March"*).
+- In the plan these are `calc` (`cumulative`, `share`, `growth`, `moving`) and `window`.
+
 ### Cleaning data
 
 Real files are messy: dates read the wrong way round, numbers stored as text because one cell says `N/A`, duplicate rows, columns you don't need. **Clean data...** (top toolbar, or type *"clean the data"* or *"remove duplicates"*) fixes these in one place.
@@ -238,20 +283,31 @@ What formulas can contain:
 
 | | |
 |---|---|
-| Numeric columns | By name, as written. Use `[Column name]` for awkward names, such as `[Discount (%)]` |
+| Numeric and date columns | By name, as written. Use `[Column name]` for awkward names, such as `[Discount (%)]` |
 | Arithmetic | `+ - * / ^` and brackets |
 | In words | `minus`, `plus`, `times`, `divided by`, `per`, `over`, `as a percent of`, `10% of` |
 | Percentages | `10%` means 0.1 |
 | Comparisons | `> < >= <= = !=` (give 1 for true, 0 for false) |
 | Functions | `abs`, `round(x, decimals)`, `floor`, `ceil`, `sqrt`, `ln`, `log`, `exp`, `min(a, b)`, `max(a, b)`, `pow(a, b)`, `if(condition, a, b)` |
+| Date parts | `year(Date)`, `month(Date)`, `quarter(Date)`, `day(Date)`, `weekday(Date)` (1 = Monday ... 7 = Sunday), `week(Date)` (ISO week), `dayofyear(Date)` |
+| Date arithmetic | `ShipDate - Date` or `days_between(Date, ShipDate)` or *"days between Date and ShipDate"* gives days; `Date + 30` gives a date; dates can be compared (`Date >= 2026-03-01`) |
+| Bands | `bands(Amount, 100, 500)` gives a text column: `under 100`, `100 to under 500`, `500 and over` |
 
-For example, `if(Amount > 500, 1, 0)` flags big orders, and `round(Cost / Units, 2)` rounds a unit cost.
+For example, `if(Amount > 500, 1, 0)` flags big orders, and `round(Cost / Units, 2)` rounds a unit cost. With the demo data:
+
+- `add column Days to ship = ShipDate - Date`, then *"Average Days to ship by region"*
+- `add column Is weekend = if(weekday(Date) > 5, 1, 0)`, then *"Total amount where Is weekend = 1"* (date parts give numbers, so use them in filters and formulas; to group by month, weekday and so on just say *"by month"* or *"by weekday"*)
+- `add column Due = Date + 30` makes a real date column, so you can ask *"Amount by Due month"*. With several date columns, name the one you mean (*"Amount by ShipDate month"*); otherwise the first is used
+- `add column Size = bands(Amount, 100, 500)`, then *"Total amount by Size"* or *"Share of amount by Size as a pie chart"*
+
+A date result becomes a **date** column and `bands(...)` a **text** column (it must be the whole formula, with plain numbers as the cut-offs in increasing order). Everything else gives a number column.
 
 Then ask as usual: *"Average Margin by Product"*, *"Total Margin by region"*, *"Show rows where Margin is below 0"*.
 
 Notes:
 
-- Only **numeric** columns can be used. A text or date column gives a clear error. Fix its type first in **Clean data...**.
+- Numeric and date columns can be used; a text column gives a clear error (fix its type first in **Clean data...**). A date can't be multiplied or used as a plain number: take a part of it (`year(...)`) or subtract two dates. Two dates can't be added.
+- Dates here have no time of day, so there is no hour-of-day part (see [Limitations](#limitations)).
 - A row is left blank when an input is blank or the formula divides by zero, and the message tells you how many rows.
 - A formula must use at least one column, and the name must be new. To redo one, remove the column in **Clean data...** and add it again.
 - With a Claude API key, a request the offline parser can't read (*"add a column for the profit after tax at 20%"*) is sent to Claude, which only sees the column names and types and returns a formula. DataChat checks that formula with the same parser; nothing the model returns is ever run as code.
@@ -418,6 +474,15 @@ Type in the box at the bottom of the chat and press Enter (or click **Ask**). Sh
 | `Last 30 days vs the previous 30` | Same comparison for relative periods |
 | `Year over year` | Year so far against the same dates a year earlier |
 | `Forecast revenue for the next 3 months` | History, dashed forecast and a 95% band (see [Forecasting](#forecasting)) |
+| `How many unique customers do we have?` | A single count of different values (see [Unique counts and "per customer" questions](#unique-counts-and-per-customer-questions)) |
+| `Average spend per customer` / `Orders per customer` | Two-stage: per customer first, then the average, with median and range |
+| `Top 10 customers by revenue` | The customers themselves, ranked, with their share of the total |
+| `How many customers spent over 3000?` | How many customers pass the line, out of all customers |
+| `Cumulative revenue by month` | Running total (see [Running totals, percent of total, growth and moving averages](#running-totals-percent-of-total-growth-and-moving-averages)) |
+| `Percent of total amount by region` | Each group as a share of the grand total |
+| `Revenue growth by month` | Percent change on the previous month |
+| `Revenue by month, 3 month moving average` | Actual values with a smoothed line |
+| `Add column Days to ship = ShipDate - Date` | Date arithmetic in a calculated column; also `month(Date)`, `bands(Amount, 100, 500)` |
 | `Join two files` | Opens the join dialog (see [Joining two files or sheets](#joining-two-files-or-sheets)) |
 | `Describe this data` | Column-by-column overview |
 
@@ -487,9 +552,12 @@ Claude (or the offline planner) produces one JSON object. The engine executes it
 
 | Field | Meaning |
 |---|---|
-| `intent` | `aggregate` (group + chart), `drivers` (explain a change), `rows` (list individual rows), `describe` (column overview), `correlate` (relationship between numeric columns), `anomalies` (unusual rows or periods: `metric` is the column to scan or `null` for all, `series` a group to compare within, `x` + `bucket` for time periods), `compare` (two periods side by side: `from`, `to`, optional `x` as the breakdown column), `forecast` (`x` is the date column, `bucket` the period size, `limit` how many periods ahead) |
+| `intent` | `aggregate` (group + chart), `drivers` (explain a change), `rows` (list individual rows), `describe` (column overview), `correlate` (relationship between numeric columns), `anomalies` (unusual rows or periods: `metric` is the column to scan or `null` for all, `series` a group to compare within, `x` + `bucket` for time periods), `compare` (two periods side by side: `from`, `to`, optional `x` as the breakdown column), `forecast` (`x` is the date column, `bucket` the period size, `limit` how many periods ahead), `entities` (list, rank or count the entities themselves: `per` is the entity column, `metric` and `inner` what to measure for each, optional `having`, `limit`) |
 | `metric` | Numeric column to measure, or `null` to count rows |
-| `agg` | `sum`, `avg`, `count`, `min`, `max`, `median` |
+| `agg` | `sum`, `avg`, `count`, `min`, `max`, `median`, `distinct` (number of different values; `metric` may then be any column, for example `CustomerID`) |
+| `per` / `inner` | For per-entity questions: `per` is the entity column (`CustomerID`), `inner` how each entity's rows are combined first (`sum`, `avg`, `count`, `min`, `max`, `median`, `distinct`), and `agg` how the per-entity values are then combined (*"average spend per customer"* is `inner: sum`, `agg: avg`) |
+| `having` | `{ "op": ">", "value": 3000 }`: keeps only entities whose per-entity value passes (used by the `entities` intent: *"customers who spent over 3000"*) |
+| `calc` / `window` | A table calculation on the aggregated result: `cumulative`, `share` (percent of total), `growth` (change on the previous period, `x` must be a date) or `moving` (moving average over `window` periods, 2 to 60). Needs an `x` |
 | `x` | Column for the x-axis or grouping (`null` = one overall number) |
 | `bucket` | For date columns: `day`, `weekday`, `week`, `month`, `quarter`, `year` (auto-chosen from the date span if omitted) |
 | `series` | Optional second grouping, drawn as separate colours (max 8 series) |
@@ -590,7 +658,10 @@ The loaded data behaves exactly like a CSV from then on, so everything else in t
 - Number columns whose every value is ambiguous (only `1,234`-style or `1.200`-style values, in a file with no other evidence) are read as US numbers.
 - Stacked charts are bars only (no stacked areas or horizontal stacks), need totals or counts without negatives, and multiple y-axes aren't supported. Other multi-series data is drawn as grouped bars or multiple lines.
 - Numeric filters in offline mode read one condition per column (for example `units > 5` or `units between 3 and 6`) and match the column name as written (the part before any brackets works for names like `Discount (%)`). More complex conditions, such as OR across columns, work best with Claude.
-- Calculated columns are numeric only, have no date arithmetic and no conditions across rows (no running totals or rank). Each is computed once when you add it.
+- Calculated columns work row by row: they can use numbers and dates in the same row but not other rows, so no running totals, ranks or "previous order" inside a formula (use the [table calculations](#running-totals-percent-of-total-growth-and-moving-averages) for running totals). A date result is a date column and `bands(...)` a text column, but there is no text manipulation. Each is computed once when you add it.
+- Dates carry no time of day (any time part is dropped when loading), so there is no hour-of-day grouping or time differences shorter than a day.
+- Entity questions treat the column as written: `C-001` and `c001` are different customers (use **Clean data...** to tidy them). *"Customers"* means the one column DataChat picked; if several columns could be customers, name it (*"unique CustomerID"*). Per-entity questions are offline-planned for the common phrasings; unusual ones (*"customers whose spend fell month on month"*) work best with Claude or as two steps.
+- Running totals, percent of total, growth and moving averages apply to one measure at a time and to totals or counts where noted; they don't combine (no *"cumulative growth"*).
 - Cleaning works on the whole table at once and replaces it with a new one (and a fresh chat); it doesn't edit individual cells. Duplicates are exact matches only.
 - Driver analysis considers text columns (up to 40 distinct values each) and two-way combinations of columns with up to 12 values. Numeric columns aren't used as dimensions.
 - Offline follow-ups handle the common refinements (split, filter, change aggregation, chart type, top N, colour by); more open-ended follow-ups such as *"why is that?"* work best with Claude.
@@ -608,6 +679,9 @@ The loaded data behaves exactly like a CSV from then on, so everything else in t
 | Status bar says *offline engine* | No API key entered, or **Offline mode** is ticked |
 | Note says *Claude's plan could not be used* | The API returned an error (bad key, wrong model name, no network) or an invalid plan. The message includes the HTTP error. The answer came from the offline engine |
 | `I couldn't find a column called ...` | The plan referenced a column that doesn't exist. Rephrase using the column names listed in the chat |
+| *"... needs a date column"* / *"Growth needs a time axis"* | Growth and moving averages work over time. Put a date column on the x-axis (*"revenue growth by month"*) |
+| *"A date can't be used directly"* | A formula used a date as a plain number. Use `year(...)`, `month(...)`, ... or subtract two dates to get days |
+| A customer question counts rows, not customers | Name the column (*"unique CustomerID"*) or check **Your data** that the customer column was read as text, not as a number (use **Clean data...** to set it to Text) |
 | `... isn't numeric` | You asked to sum or average a text or date column. Use a numeric column, or count instead |
 | Dates not recognised | Check the **Your data** tab and the *Describe this data* answer to see the detected type. Reformat the column as `yyyy-MM-dd` |
 | Garbled characters | Re-save the file as UTF-8 |
@@ -643,14 +717,14 @@ Everything lives in `DataChat.java`, organised as nested classes:
 |---|---|
 | `DataChat` | Swing UI: toolbar, chat transcript, tabs, drag and drop, background `SwingWorker` tasks |
 | `DataTable`, `Column` | In-memory table, CSV parsing, type detection (`NUMBER` / `DATE` / `TEXT`), schema description for the model |
-| `Calc` | Calculated columns: tokenizer, a small recursive-descent parser and per-row evaluation (no code execution), plus `parseDefinition` for finding "add column ..." in a sentence |
+| `Calc` | Calculated columns: tokenizer, a small recursive-descent parser and per-row evaluation (no code execution), plus `parseDefinition` for finding "add column ..." in a sentence. Nodes carry a kind (number, date as days since 1970, or text from `bands`) so that date arithmetic is checked while parsing |
 | `Clean` | Cleaning: type overrides (`Column.forceNumber`, `forceDate`), "treat as empty" values, duplicates, renames, dropped columns, and the change summary |
 | `Join` | Joins: key normalisation, `suggest` (picks the likely key pair), `check` (match quality without building anything), `join` (inner, left or full) and the plain-English `notes`. The dialog and file/sheet adder are `DataChat.joinDialog` and `addTablesFromFile` |
 | `Xlsx` | Dependency-free Excel reader: unzips the workbook, streams the XML, resolves shared strings, date and percent styles, and tidies the grid into rows for `DataTable` |
 | `Plan`, `Filter` | The analysis plan, with JSON conversion |
-| `Engine` | Executes a plan: filtering, grouping, aggregation, driver analysis, correlation, anomaly detection (`anomalies`, `periodAnomalies`, `robustScores`), period comparison (`compare`, `spanOf`), forecasting (`forecast`, `fitModel`, `chooseModel`), fact generation |
+| `Engine` | Executes a plan: filtering, grouping, aggregation (including the two-stage `per` / `inner` path and `distinct`), the `entities` list, table calculations (`applyCalc`: cumulative, share, growth, moving), driver analysis, correlation, anomaly detection (`anomalies`, `periodAnomalies`, `robustScores`), period comparison (`compare`, `spanOf`), forecasting (`forecast`, `fitModel`, `chooseModel`), fact generation |
 | `Result`, `ChartData` | Output of the engine: table rows, chart specs, plain-English facts |
-| `LocalPlanner` | Offline natural-language to plan translation (including follow-ups that modify the previous plan, correlation detection, and `comparePeriods` for resolving period names), and offline answer text |
+| `LocalPlanner` | Offline natural-language to plan translation (`entityPlan` for unique counts and per-customer questions, `calcWords` for table calculations; including follow-ups that modify the previous plan, correlation detection, and `comparePeriods` for resolving period names), and offline answer text |
 | `Drill` | Turns a click on a chart element into a follow-up `Plan` |
 | `Claude` | Anthropic Messages API client plus the planner and explainer system prompts |
 | `Json` | Minimal JSON reader and writer (no libraries) |
@@ -666,6 +740,8 @@ Everything lives in `DataChat.java`, organised as nested classes:
 - **New aggregation:** add it to `Acc.get`, `Engine.aggOf` and `measureLabel`, and mention it in `Claude.PLAN_SYSTEM`.
 - **New time bucket:** add a case in `Engine.bucketLabel` and the allowed set in `Engine.bucketOf`.
 - **New chart type:** add a `ChartType`, a paint method in `ChartPanel`, and a rule in `Engine.chartType`.
+- **New table calculation:** add a case in `Engine.applyCalc`, accept the word in `Plan.fromJson`, add the phrase in `LocalPlanner.calcWords`, and describe it in `Claude.PLAN_SYSTEM`.
+- **New formula function:** add the name to `Calc.FUNCS` and a case in `Parser.func` (or `DATE_PART_FUNCS` for a date part), and mention it in `Claude.formula`.
 - **New follow-up phrase:** add the cue to `LocalPlanner.STRONG` (or `WEAK` for very short questions) and handle what it changes in `LocalPlanner.followUp`.
 - **New drill-down behaviour:** edit `Drill.plan`. Charts carry what a click means in `ChartData` (`basePlan`, `labelFilters`, `seriesFilters`, `periodX`).
 - **Dark palette:** edit the colours in `DarkTheme` (whole UI), `ChartPanel.setDark` (charts) and `DataChat.renderChat` (chat text colours).

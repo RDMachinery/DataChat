@@ -2231,15 +2231,38 @@ public class DataChat extends JFrame {
             CalcException(String m) { super(m); }
         }
 
-        interface Node { double eval(int row); }
+        /** kind(): 'n' number, 'd' date (days since 1970-01-01), 't' text label (only from bands(...)). */
+        interface Node {
+            double eval(int row);
+
+            default char kind() { return 'n'; }
+
+            default String[] labels() { return null; }
+        }
+
+        private static Node typed(char k, Node n, String[] labels) {
+            return new Node() {
+                public double eval(int row) { return n.eval(row); }
+
+                public char kind() { return k; }
+
+                public String[] labels() { return labels; }
+            };
+        }
+
+        private static Node typed(char k, Node n) { return typed(k, n, null); }
 
         record Def(String name, String expr, boolean explicit) {}
 
-        record Compiled(Node root, List<Column> used, String text) {}
+        record Compiled(Node root, List<Column> used, String text) {
+            char kind() { return root.kind(); }
+        }
 
         private record Tok(char kind, String s, double v, Column col) {}   // kinds: n number, c column, o operator, f function
 
-        static final Set<String> FUNCS = Set.of("abs", "round", "floor", "ceil", "sqrt", "ln", "log", "exp", "min", "max", "if", "pow");
+        static final Set<String> FUNCS = Set.of("abs", "round", "floor", "ceil", "sqrt", "ln", "log", "exp", "min", "max", "if", "pow",
+                "year", "month", "quarter", "day", "weekday", "week", "dayofyear", "days_between", "bands");
+        private static final Set<String> DATE_PART_FUNCS = Set.of("year", "month", "quarter", "day", "weekday", "week", "dayofyear");
 
         // ---------------------------------------------------------------- finding a definition in a sentence
         private static final Pattern EXPLICIT = Pattern.compile("(?is)^\\s*(?:please\\s+)?(?:(?:can|could|would)\\s+you\\s+)?(?:add|create|make|define|insert|build|new)\\s+(?:me\\s+)?(?:a\\s+|an\\s+|the\\s+)?(?:new\\s+)?(?:calculated\\s+|computed\\s+|derived\\s+)?(?:column|field|measure|metric)\\b\\s*(.*)$");
@@ -2335,6 +2358,7 @@ public class DataChat extends JFrame {
                     char next = i + L < n ? src.charAt(i + L) : ' ';
                     boolean wordEnd = Character.isLetterOrDigit(last) || last == '_';
                     if (wordEnd && (Character.isLetterOrDigit(next) || next == '_')) continue;
+                    if (FUNCS.contains(col.name.toLowerCase(Locale.ROOT)) && src.substring(i + L).stripLeading().startsWith("(")) continue;   // a column called "Month" and the function month(...)
                     hit = col;
                     break;
                 }
@@ -2342,6 +2366,20 @@ public class DataChat extends JFrame {
                     out.add(new Tok('c', hit.name, 0, hit));
                     i += hit.name.length();
                     continue;
+                }
+                if (Character.isDigit(c)) {
+                    Matcher dm = Pattern.compile("(\\d{4})-(\\d{1,2})-(\\d{1,2})(?![\\d])").matcher(src);
+                    dm.region(i, n);
+                    if (dm.lookingAt()) {
+                        try {
+                            LocalDate d = LocalDate.of(Integer.parseInt(dm.group(1)), Integer.parseInt(dm.group(2)), Integer.parseInt(dm.group(3)));
+                            out.add(new Tok('D', dm.group(), d.toEpochDay(), null));
+                            i = dm.end();
+                            continue;
+                        } catch (java.time.DateTimeException e) {
+                            throw new CalcException("\"" + dm.group() + "\" isn't a real date.");
+                        }
+                    }
                 }
                 if (Character.isDigit(c) || (c == '.' && i + 1 < n && Character.isDigit(src.charAt(i + 1)))) {
                     Matcher m = Pattern.compile("\\d*\\.?\\d+(?:[eE][-+]?\\d+)?").matcher(src);
@@ -2450,6 +2488,7 @@ public class DataChat extends JFrame {
             final List<Tok> toks;
             int p;
             final Set<Column> used = new LinkedHashSet<>();
+            int colRefs;   // how many column references were read so far (lets bands(...) insist on constant cut-offs)
 
             Parser(List<Tok> toks) { this.toks = toks; }
 
@@ -2460,6 +2499,14 @@ public class DataChat extends JFrame {
                 if (t == null || t.kind() != 'o') return false;
                 for (String o : ops) if (t.s().equals(o)) return true;
                 return false;
+            }
+
+            /** Requires a plain number; explains what to do instead for dates and band labels. */
+            Node num(Node n, String ctx) throws CalcException {
+                if (n.kind() == 'd') throw new CalcException("A date can't be used directly in " + ctx + ". Take a part of it with year(...), month(...), quarter(...), day(...), weekday(...) or week(...), "
+                        + "or subtract two dates to get a number of days.");
+                if (n.kind() == 't') throw new CalcException("bands(...) gives text labels, so it has to be the whole formula (for example: bands(Amount, 100, 500)).");
+                return n;
             }
 
             Node parse() throws CalcException {
@@ -2474,6 +2521,8 @@ public class DataChat extends JFrame {
                 while (isOp("<", ">", "<=", ">=", "=", "!=")) {
                     String op = toks.get(p++).s();
                     Node r = add(), lf = l;
+                    if (lf.kind() == 't' || r.kind() == 't') num(lf.kind() == 't' ? lf : r, "a comparison");
+                    if (lf.kind() != r.kind()) throw new CalcException("A date can only be compared with another date (for example Date >= 2026-03-01), not with a plain number.");
                     l = row -> {
                         double a = lf.eval(row), b = r.eval(row);
                         if (Double.isNaN(a) || Double.isNaN(b)) return Double.NaN;
@@ -2496,7 +2545,16 @@ public class DataChat extends JFrame {
                 while (isOp("+", "-")) {
                     boolean plus = toks.get(p++).s().equals("+");
                     Node r = mul(), lf = l;
-                    l = plus ? row -> lf.eval(row) + r.eval(row) : row -> lf.eval(row) - r.eval(row);
+                    char lk = lf.kind(), rk = r.kind();
+                    if (lk == 't' || rk == 't') num(lk == 't' ? lf : r, "arithmetic");
+                    Node res = plus ? row -> lf.eval(row) + r.eval(row) : row -> lf.eval(row) - r.eval(row);
+                    if (lk == 'n' && rk == 'n') l = res;
+                    else if (plus && lk == 'd' && rk == 'd') throw new CalcException("Two dates can't be added together. Subtract them to get the number of days between them, or add a number of days to one date.");
+                    else if (lk == 'd' && rk == 'n') l = typed('d', res);      // date +/- days = date
+                    else if (lk == 'n' && rk == 'd') {
+                        if (!plus) throw new CalcException("A date can't be subtracted from a plain number. Write the date first (Date - 30).");
+                        l = typed('d', res);
+                    } else l = res;                                              // date - date = number of days
                 }
                 return l;
             }
@@ -2506,6 +2564,8 @@ public class DataChat extends JFrame {
                 while (isOp("*", "/", "pct")) {
                     String op = toks.get(p++).s();
                     Node r = unary(), lf = l;
+                    num(lf, "multiplication or division");
+                    num(r, "multiplication or division");
                     l = switch (op) {
                         case "*" -> row -> lf.eval(row) * r.eval(row);
                         case "/" -> row -> {
@@ -2524,7 +2584,7 @@ public class DataChat extends JFrame {
             Node unary() throws CalcException {
                 if (isOp("-")) {
                     p++;
-                    Node x = unary();
+                    Node x = num(unary(), "a negative value");
                     return row -> -x.eval(row);
                 }
                 if (isOp("+")) {
@@ -2538,7 +2598,8 @@ public class DataChat extends JFrame {
                 Node b = atom();
                 if (isOp("^")) {
                     p++;
-                    Node e = unary();
+                    Node e = num(unary(), "a power");
+                    num(b, "a power");
                     return row -> Math.pow(b.eval(row), e.eval(row));
                 }
                 return b;
@@ -2555,10 +2616,21 @@ public class DataChat extends JFrame {
                     }
                     case 'c': {
                         Column c = t.col();
-                        if (c.type != ColType.NUMBER) throw new CalcException("\"" + c.name + "\" isn't a numeric column (it holds " + c.type.name().toLowerCase(Locale.ROOT) + "), so it can't be used in arithmetic.");
+                        if (c.type == ColType.DATE) {
+                            used.add(c);
+                            colRefs++;
+                            LocalDate[] dv = c.date;
+                            return typed('d', row -> dv[row] == null ? Double.NaN : dv[row].toEpochDay());
+                        }
+                        if (c.type != ColType.NUMBER) throw new CalcException("\"" + c.name + "\" isn't a numeric or date column (it holds " + c.type.name().toLowerCase(Locale.ROOT) + "), so it can't be used in a formula.");
                         used.add(c);
+                        colRefs++;
                         double[] v = c.num;
                         return row -> v[row];
+                    }
+                    case 'D': {
+                        double v = t.v();
+                        return typed('d', row -> v);
                     }
                     case 'f': {
                         if (!isOp("(")) throw new CalcException("Expected ( after " + t.s() + ".");
@@ -2566,9 +2638,12 @@ public class DataChat extends JFrame {
                         List<Node> args = new ArrayList<>();
                         if (!isOp(")")) {
                             args.add(compare());
+                            int refsAfterFirst = colRefs;
                             while (isOp(",")) {
                                 p++;
                                 args.add(compare());
+                                if (t.s().equals("bands") && colRefs != refsAfterFirst)
+                                    throw new CalcException("The cut-offs in bands(...) must be plain numbers, like bands(Amount, 100, 500), not columns.");
                             }
                         }
                         if (!isOp(")")) throw new CalcException("Missing ) after the arguments of " + t.s() + ".");
@@ -2588,6 +2663,54 @@ public class DataChat extends JFrame {
 
             Node func(String f, List<Node> a) throws CalcException {
                 int n = a.size();
+                if (DATE_PART_FUNCS.contains(f)) {
+                    if (n != 1) throw new CalcException(f + " takes one date column, for example " + f + "(Date).");
+                    Node x = a.get(0);
+                    if (x.kind() != 'd') throw new CalcException(f + "(...) needs a date column or a date value, but this isn't a date. Date columns here: use the column names exactly as listed on the left.");
+                    return row -> {
+                        double v = x.eval(row);
+                        if (Double.isNaN(v)) return Double.NaN;
+                        LocalDate d = LocalDate.ofEpochDay((long) v);
+                        return switch (f) {
+                            case "year" -> d.getYear();
+                            case "month" -> d.getMonthValue();
+                            case "quarter" -> (d.getMonthValue() - 1) / 3 + 1;
+                            case "day" -> d.getDayOfMonth();
+                            case "weekday" -> d.getDayOfWeek().getValue();   // 1 = Monday ... 7 = Sunday
+                            case "dayofyear" -> d.getDayOfYear();
+                            default -> d.get(java.time.temporal.IsoFields.WEEK_OF_WEEK_BASED_YEAR);
+                        };
+                    };
+                }
+                if (f.equals("days_between")) {
+                    if (n != 2 || a.get(0).kind() != 'd' || a.get(1).kind() != 'd')
+                        throw new CalcException("days_between takes two dates: days_between(start, end), for example days_between(Date, ShipDate). It gives end minus start in days.");
+                    Node s0 = a.get(0), e0 = a.get(1);
+                    return row -> e0.eval(row) - s0.eval(row);
+                }
+                if (f.equals("bands")) {
+                    if (n < 2) throw new CalcException("bands needs a numeric column and at least one cut-off, for example bands(Amount, 100, 500) gives \"under 100\", \"100 to under 500\" and \"500 and over\".");
+                    Node x = num(a.get(0), "bands");
+                    double[] cuts = new double[n - 1];
+                    for (int k = 1; k < n; k++) {
+                        Node c = num(a.get(k), "bands");
+                        cuts[k - 1] = c.eval(0);
+                        if (Double.isNaN(cuts[k - 1])) throw new CalcException("The cut-offs in bands(...) must be plain numbers, like bands(Amount, 100, 500).");
+                        if (k > 1 && cuts[k - 1] <= cuts[k - 2]) throw new CalcException("The cut-offs in bands(...) must be in increasing order, like bands(Amount, 100, 500).");
+                    }
+                    String[] labels = new String[n];
+                    labels[0] = "under " + cutText(cuts[0]);
+                    for (int k = 1; k < n - 1; k++) labels[k] = cutText(cuts[k - 1]) + " to under " + cutText(cuts[k]);
+                    labels[n - 1] = cutText(cuts[n - 2]) + " and over";
+                    return typed('t', row -> {
+                        double v = x.eval(row);
+                        if (Double.isNaN(v)) return Double.NaN;
+                        int b = 0;
+                        while (b < cuts.length && v >= cuts[b]) b++;
+                        return b;
+                    }, labels);
+                }
+                for (Node x : a) num(x, f + "(...)");
                 switch (f) {
                     case "abs", "floor", "ceil", "sqrt", "ln", "log", "exp": {
                         if (n != 1) throw new CalcException(f + " takes one value.");
@@ -2645,8 +2768,14 @@ public class DataChat extends JFrame {
             }
         }
 
+        static String cutText(double v) {
+            return v == Math.rint(v) && Math.abs(v) < 1e15 ? String.format(Locale.US, "%,d", (long) v) : new java.math.BigDecimal(v).setScale(6, java.math.RoundingMode.HALF_UP).stripTrailingZeros().toPlainString();
+        }
+
         static Compiled compile(String expr, DataTable t) throws CalcException {
             if (expr == null || expr.isBlank()) throw new CalcException("The formula is empty.");
+            Matcher db = Pattern.compile("(?is)^\\s*(?:the\\s+)?(?:number of\\s+)?days\\s+between\\s+(.+?)\\s+and\\s+(.+?)\\s*$").matcher(expr);
+            if (db.matches()) expr = "days_between(" + db.group(1) + ", " + db.group(2) + ")";
             Parser ps = new Parser(tokenize(expr, t));
             Node root = ps.parse();
             if (ps.used.isEmpty()) throw new CalcException("The formula doesn't use any column, so every row would get the same value. Include at least one numeric column. " + available(t));
@@ -2655,12 +2784,43 @@ public class DataChat extends JFrame {
 
         record Built(Column column, int blank, List<String> samples) {}
 
+        /** Date results (Date + 30) become DATE columns; bands(...) results become TEXT columns. */
+        private static Built buildNonNumeric(Column col, Compiled c, DataTable t) throws CalcException {
+            col.text = new String[t.rows];
+            boolean isDate = c.kind() == 'd';
+            String[] labels = c.root().labels();
+            if (isDate) col.date = new LocalDate[t.rows];
+            int blank = 0, ok = 0;
+            List<String> samples = new ArrayList<>();
+            for (int r = 0; r < t.rows; r++) {
+                double v = c.root().eval(r);
+                if (Double.isNaN(v) || Double.isInfinite(v)) {
+                    col.text[r] = "";
+                    blank++;
+                    continue;
+                }
+                ok++;
+                if (isDate) {
+                    LocalDate d = LocalDate.ofEpochDay((long) v);
+                    col.date[r] = d;
+                    col.text[r] = d.toString();
+                    if (col.dmin == null || d.isBefore(col.dmin)) col.dmin = d;
+                    if (col.dmax == null || d.isAfter(col.dmax)) col.dmax = d;
+                } else col.text[r] = labels[(int) v];
+                if (samples.size() < 3) samples.add(col.text[r]);
+            }
+            if (ok == 0) throw new CalcException("The formula gives no value for any row (every row has a blank input).");
+            col.type = isDate ? ColType.DATE : ColType.TEXT;
+            return new Built(col, blank, samples);
+        }
+
         /** Evaluates the formula for every row and returns a ready-to-add numeric column. */
         static Built build(String name, Compiled c, DataTable t) throws CalcException {
             if (name == null || name.isBlank()) throw new CalcException("The new column needs a name.");
             for (Column e : t.cols) if (e.name.equalsIgnoreCase(name.trim()))
                 throw new CalcException("There is already a column called \"" + e.name + "\". Choose a different name (or remove that column first in Clean data...).");
             Column col = new Column(name.trim());
+            if (c.kind() == 'd' || c.kind() == 't') return buildNonNumeric(col, c, t);
             col.type = ColType.NUMBER;
             col.text = new String[t.rows];
             col.num = new double[t.rows];
@@ -3410,15 +3570,17 @@ public class DataChat extends JFrame {
 
     static final class Plan {
         String intent = "aggregate", title, metric, agg = "sum", x, bucket, series, sort = "none", chart = "auto",
-                from, to, direction = "drop", message, time;
-        Integer limit;
+                from, to, direction = "drop", message, time,
+                per, inner, havingOp, calc;       // per: entity column for "per customer" questions; inner: how to measure each entity; having: filter on that value; calc: table calculation
+        Integer limit, window;
+        Double havingVal;
         List<Filter> filters = new ArrayList<>();
 
         @SuppressWarnings("unchecked")
         static Plan fromJson(Map<String, Object> m) {
             Plan p = new Plan();
             String in = lower(nz(m.get("intent")));
-            p.intent = in != null && Set.of("aggregate", "drivers", "rows", "describe", "correlate", "anomalies", "compare", "forecast").contains(in) ? in : "aggregate";
+            p.intent = in != null && Set.of("aggregate", "drivers", "rows", "describe", "correlate", "anomalies", "compare", "forecast", "entities").contains(in) ? in : "aggregate";
             p.title = nz(m.get("title"));
             p.metric = nz(m.get("metric"));
             String a = lower(nz(m.get("agg")));
@@ -3432,6 +3594,24 @@ public class DataChat extends JFrame {
             if (ch != null) p.chart = ch;
             p.from = nz(m.get("from"));
             p.time = nz(m.get("time"));
+            p.per = nz(m.get("per"));
+            String inn = lower(nz(m.get("inner")));
+            if (inn != null && Set.of("sum", "avg", "count", "min", "max", "median", "distinct").contains(inn)) p.inner = inn;
+            if (m.get("having") instanceof Map<?, ?> hm) {
+                String hop = nz(hm.get("op"));
+                Object hv = hm.get("value");
+                if (hop != null && Set.of(">", ">=", "<", "<=", "=", "!=").contains(hop.trim()) && hv != null) {
+                    try {
+                        p.havingVal = hv instanceof Number hn ? hn.doubleValue() : Double.parseDouble(hv.toString().replace(",", "").trim());
+                        p.havingOp = hop.trim();
+                    } catch (NumberFormatException ignored) {
+                    }
+                }
+            }
+            String cc = lower(nz(m.get("calc")));
+            if (cc != null && Set.of("cumulative", "share", "growth", "moving").contains(cc)) p.calc = cc;
+            Object wn = m.get("window");
+            if (wn instanceof Number wnn && wnn.intValue() >= 2 && wnn.intValue() <= 60) p.window = wnn.intValue();
             p.to = nz(m.get("to"));
             String dir = lower(nz(m.get("direction")));
             if (dir != null) p.direction = dir;
@@ -3480,6 +3660,11 @@ public class DataChat extends JFrame {
             if (limit != null) m.put("limit", limit);
             m.put("chart", chart);
             if (time != null) m.put("time", time);
+            if (per != null) m.put("per", per);
+            if (inner != null) m.put("inner", inner);
+            if (havingOp != null && havingVal != null) m.put("having", new LinkedHashMap<>(Map.of("op", havingOp, "value", havingVal)));
+            if (calc != null) m.put("calc", calc);
+            if (window != null) m.put("window", window);
             if (from != null) m.put("from", from);
             if (to != null) m.put("to", to);
             if (intent.equals("drivers")) m.put("direction", direction);
@@ -3500,6 +3685,12 @@ public class DataChat extends JFrame {
             c.chart = chart;
             c.from = from;
             c.time = time;
+            c.per = per;
+            c.inner = inner;
+            c.havingOp = havingOp;
+            c.havingVal = havingVal;
+            c.calc = calc;
+            c.window = window;
             c.to = to;
             c.direction = direction;
             c.message = message;
@@ -3629,6 +3820,13 @@ public class DataChat extends JFrame {
         long n;
         double min = Double.POSITIVE_INFINITY, max = Double.NEGATIVE_INFINITY;
         ArrayList<Double> vals;
+        HashSet<String> distinct;
+
+        void addDistinct(String v) {
+            if (distinct == null) distinct = new HashSet<>();
+            distinct.add(v);
+            n++;
+        }
 
         void add(double v, boolean keep) {
             sum += v;
@@ -3642,8 +3840,9 @@ public class DataChat extends JFrame {
         }
 
         double get(String agg) {
-            if (n == 0) return agg.equals("count") || agg.equals("sum") ? 0 : Double.NaN;
+            if (n == 0) return agg.equals("count") || agg.equals("sum") || agg.equals("distinct") ? 0 : Double.NaN;
             switch (agg) {
+                case "distinct": return distinct == null ? 0 : distinct.size();
                 case "avg": return sum / n;
                 case "count": return n;
                 case "min": return min;
@@ -3679,6 +3878,7 @@ public class DataChat extends JFrame {
                 case "anomalies" -> anomalies(t, p, keep, r);
                 case "compare" -> compare(t, p, keep, r);
                 case "forecast" -> forecast(t, p, keep, r);
+                case "entities" -> entities(t, p, keep, r);
                 default -> aggregate(t, p, keep, r);
             }
             if (p.message != null) r.facts.add(p.message);
@@ -3706,8 +3906,9 @@ public class DataChat extends JFrame {
         static Column metricOf(DataTable t, Plan p) throws AnalysisException {
             if (p.metric == null) return null;
             Column c = need(t, p.metric, "measure");
+            if ("distinct".equals(p.agg) || "distinct".equals(p.inner)) return c;   // unique values of any column
             if (c.type != ColType.NUMBER) {
-                if ("count".equals(p.agg)) return null;
+                if ("count".equals(p.agg) || ("count".equals(p.inner) && p.per != null)) return null;
                 throw new AnalysisException("Column \"" + c.name + "\" isn't numeric, so I can't " + p.agg + " it. Numeric columns: "
                         + t.colsOfType(ColType.NUMBER).stream().map(x -> x.name).toList() + ".");
             }
@@ -3717,7 +3918,75 @@ public class DataChat extends JFrame {
         static String aggOf(Plan p, Column m) {
             if (m == null) return "count";
             String a = p.agg == null ? "sum" : p.agg;
-            return Set.of("sum", "avg", "count", "min", "max", "median").contains(a) ? a : "sum";
+            return Set.of("sum", "avg", "count", "min", "max", "median", "distinct").contains(a) ? a : "sum";
+        }
+
+        /** Outer aggregation of a two-stage ("per customer") question: what to do with the per-entity values. */
+        static String outerOf(Plan p) {
+            String a = p.agg == null ? "avg" : p.agg;
+            return Set.of("sum", "avg", "count", "min", "max", "median").contains(a) ? a : "avg";
+        }
+
+        /** Inner aggregation of a two-stage question: how each entity (customer, product...) is measured. */
+        static String innerOf(Plan p, Column m) {
+            String a = p.inner;
+            if (a != null && Set.of("sum", "avg", "count", "min", "max", "median", "distinct").contains(a)) return a;
+            if (m == null) return "count";
+            return m.type == ColType.NUMBER ? "sum" : "distinct";
+        }
+
+        static String innerPhrase(String inner, Column m) {
+            if (m == null) return "number of rows";
+            return switch (inner) {
+                case "avg" -> "average " + m.name;
+                case "count" -> "number of rows";
+                case "min" -> "lowest " + m.name;
+                case "max" -> "highest " + m.name;
+                case "median" -> "median " + m.name;
+                case "distinct" -> "unique " + m.name;
+                default -> "total " + m.name;
+            };
+        }
+
+        static String perLabel(String outer, String inner, Column m, Column pc) {
+            if (outer.equals("count")) return "Number of " + pc.name + " values";
+            String w = switch (outer) {
+                case "avg" -> "Average";
+                case "median" -> "Median";
+                case "max" -> "Highest";
+                case "min" -> "Lowest";
+                default -> "Total";
+            };
+            if (inner.equals("avg") || inner.equals("min") || inner.equals("max") || inner.equals("median"))
+                return w + " of each " + pc.name + "'s " + innerPhrase(inner, m);
+            if (w.equals("Total") && inner.equals("sum")) return "Total " + m.name + " per " + pc.name;
+            return w + " " + innerPhrase(inner, m) + " per " + pc.name;
+        }
+
+        static boolean passesHaving(Plan p, double v) {
+            if (p.havingOp == null || p.havingVal == null) return true;
+            double h = p.havingVal;
+            return switch (p.havingOp) {
+                case ">" -> v > h;
+                case ">=" -> v >= h;
+                case "<" -> v < h;
+                case "<=" -> v <= h;
+                case "=" -> v == h;
+                default -> v != h;
+            };
+        }
+
+        static String havingText(Plan p) {
+            if (p.havingOp == null || p.havingVal == null) return "";
+            String w = switch (p.havingOp) {
+                case ">" -> "over";
+                case ">=" -> "at least";
+                case "<" -> "under";
+                case "<=" -> "at most";
+                case "=" -> "exactly";
+                default -> "other than";
+            };
+            return w + " " + Fmt.full(p.havingVal);
         }
 
         static String measureLabel(String agg, Column m) {
@@ -3728,6 +3997,7 @@ public class DataChat extends JFrame {
                 case "min" -> "Minimum " + m.name;
                 case "max" -> "Maximum " + m.name;
                 case "median" -> "Median " + m.name;
+                case "distinct" -> "Unique " + m.name;
                 default -> "Total " + m.name;
             };
         }
@@ -4874,30 +5144,86 @@ public class DataChat extends JFrame {
         // ------------------------------------------------------------ aggregate
         static void aggregate(DataTable t, Plan p, boolean[] keep, Result r) throws AnalysisException {
             Column m = metricOf(t, p);
-            String agg = aggOf(p, m);
+            Column pc = optional(t, p.per, "per");
+            String inner = pc == null ? null : innerOf(p, m);
+            String agg = pc != null ? outerOf(p) : aggOf(p, m);
+            if (pc != null && !inner.equals("count") && !inner.equals("distinct") && (m == null || m.type != ColType.NUMBER))
+                throw new AnalysisException("Say what to measure for each " + pc.name + ", for example the total of a numeric column. Numeric columns: "
+                        + t.colsOfType(ColType.NUMBER).stream().map(x -> x.name).toList() + ".");
             Column xc = optional(t, p.x, "x-axis");
             Column sc = optional(t, p.series, "series");
             if (sc != null && sc == xc) sc = null;
+            if (pc != null && (pc == xc || pc == sc)) throw new AnalysisException("\"" + pc.name + "\" can't be both the thing measured per and the grouping.");
             boolean timeX = xc != null && xc.type == ColType.DATE;
             String xb = timeX ? bucketOf(p.bucket, xc, keep) : null;
             String sb = (sc != null && sc.type == ColType.DATE) ? bucketOf(p.bucket, sc, keep) : null;
-            String measure = measureLabel(agg, m);
+            String measure = pc != null ? perLabel(agg, inner, m, pc) : measureLabel(agg, m);
+            boolean distinctAgg = pc == null && agg.equals("distinct");
 
             Map<String, Map<String, Acc>> grid = new LinkedHashMap<>();
+            Map<String, Map<String, Map<String, Acc>>> stage1 = pc != null ? new LinkedHashMap<>() : null;
             for (int i = 0; i < t.rows; i++) {
                 if (!keep[i]) continue;
                 double v = 1;
-                if (m != null) {
-                    v = m.num[i];
-                    if (Double.isNaN(v)) continue;
+                String dv = null;
+                if (pc != null) {
+                    if (m != null && !inner.equals("count") && !inner.equals("distinct")) {
+                        v = m.num[i];
+                        if (Double.isNaN(v)) continue;
+                    }
+                    if (inner.equals("distinct")) {
+                        dv = m.text[i];
+                        if (dv == null || dv.isBlank()) continue;
+                        dv = dv.trim();
+                    }
+                } else if (m != null) {
+                    if (distinctAgg) {
+                        dv = m.text[i];
+                        if (dv == null || dv.isBlank()) continue;
+                        dv = dv.trim();
+                    } else {
+                        v = m.num[i];
+                        if (Double.isNaN(v)) continue;
+                    }
                 }
                 String xk = xc == null ? "Total" : key(xc, i, xb);
                 if (xk == null) continue;
                 String sk = sc == null ? measure : key(sc, i, sb);
                 if (sk == null) continue;
-                grid.computeIfAbsent(xk, k -> new LinkedHashMap<>()).computeIfAbsent(sk, k -> new Acc()).add(v, agg.equals("median"));
+                if (pc != null) {
+                    String ek = key(pc, i, null);
+                    if (ek == null) continue;
+                    Acc ia = stage1.computeIfAbsent(xk, k -> new LinkedHashMap<>()).computeIfAbsent(sk, k -> new LinkedHashMap<>()).computeIfAbsent(ek, k -> new Acc());
+                    if (dv != null) ia.addDistinct(dv);
+                    else ia.add(v, inner.equals("median"));
+                    continue;
+                }
+                Acc a = grid.computeIfAbsent(xk, k -> new LinkedHashMap<>()).computeIfAbsent(sk, k -> new Acc());
+                if (dv != null) a.addDistinct(dv);
+                else a.add(v, agg.equals("median"));
             }
-            if (grid.isEmpty()) throw new AnalysisException("There were no usable values for that combination of columns.");
+            List<Double> everyEntity = new ArrayList<>();
+            int entityTotal = 0;
+            if (pc != null) {
+                Set<String> allEntities = new HashSet<>();
+                for (var xe : stage1.entrySet())
+                    for (var se : xe.getValue().entrySet()) {
+                        Acc outer = new Acc();
+                        for (var ee : se.getValue().entrySet()) {
+                            double val = ee.getValue().get(inner);
+                            if (Double.isNaN(val)) continue;
+                            allEntities.add(ee.getKey());
+                            if (!passesHaving(p, val)) continue;
+                            outer.add(val, agg.equals("median"));
+                            if (xc == null && sc == null) everyEntity.add(val);
+                        }
+                        if (outer.n > 0) grid.computeIfAbsent(xe.getKey(), k -> new LinkedHashMap<>()).put(se.getKey(), outer);
+                    }
+                entityTotal = allEntities.size();
+            }
+            if (grid.isEmpty()) throw new AnalysisException(pc != null && p.havingOp != null
+                    ? "No " + pc.name + " value has " + innerPhrase(inner, m) + " " + havingText(p) + "."
+                    : "There were no usable values for that combination of columns.");
 
             // series
             List<String> ss = new ArrayList<>();
@@ -4949,8 +5275,19 @@ public class DataChat extends JFrame {
             for (int si = 0; si < ss.size(); si++)
                 for (int xi = 0; xi < xs.size(); xi++) {
                     Acc a = grid.get(xs.get(xi)).get(ss.get(si));
-                    vals[si][xi] = a == null ? (additive(agg) ? 0 : Double.NaN) : a.get(agg);
+                    vals[si][xi] = a == null ? (additive(agg) || agg.equals("distinct") ? 0 : Double.NaN) : a.get(agg);
                 }
+
+            // table calculations: running total, percent of total, growth, moving average
+            CalcOut co = null;
+            if (p.calc != null && xc != null && pc == null || (p.calc != null && xc != null && pc != null)) {
+                co = applyCalc(p, timeX && !weekday, timeX, xb, xc.name, xs, ss, vals, agg, measure, r);
+                if (co != null) {
+                    vals = co.vals();
+                    ss = co.ss();
+                    measure = co.measure();
+                }
+            }
 
             // table
             String xName = xc == null ? "" : (timeX ? xc.name + " (" + xb + ")" : xc.name);
@@ -4964,7 +5301,7 @@ public class DataChat extends JFrame {
             }
 
             r.title = p.title != null ? p.title
-                    : measure + (xc != null ? " by " + (timeX ? xb : xc.name) : "") + (sc != null ? " and " + sc.name : "");
+                    : (co != null ? co.title() : measure + (xc != null ? " by " + (timeX ? xb : xc.name) : "") + (sc != null ? " and " + sc.name : ""));
 
             // chart
             if (xc != null) {
@@ -4975,7 +5312,13 @@ public class DataChat extends JFrame {
                 ChartData cd = new ChartData();
                 cd.type = chartType(p.chart, timeX && !weekday, xs.size(), ss.size(), neg, maxLabel);
                 cd.additive = additive(agg) && !neg && ss.size() >= 2;
-                if (p.chart != null && p.chart.startsWith("stacked")) {
+                if (co != null) {
+                    cd.additive = co.type() == ChartType.STACK100;
+                    if (co.type() != null) cd.type = co.type();
+                    cd.signColors = co.sign();
+                    if (!co.sign() && co.type() == null && p.chart != null && p.chart.equals("pie")) cd.type = ChartType.BAR;
+                }
+                if (co == null && p.chart != null && p.chart.startsWith("stacked")) {
                     if (cd.additive) cd.type = p.chart.equals("stacked100") ? ChartType.STACK100 : ChartType.STACK;
                     else r.facts.add("Stacked bars need a second grouping, and totals or counts with no negative values, so I drew an ordinary chart. "
                             + "Try something like \"revenue by month and category, stacked\".");
@@ -5004,7 +5347,315 @@ public class DataChat extends JFrame {
                 if (!r.rows.isEmpty()) r.charts.add(cd);
             }
 
-            facts(r, p, xc, timeX && !weekday, xb, xs, ss, vals, agg, measure, m, matchedNote(r, p));
+            if (co != null) { /* facts were written by applyCalc */ }
+            else if (pc != null && xc == null && sc == null) perFacts(r, p, pc, m, inner, agg, measure, everyEntity, entityTotal, vals[0][0]);
+ else if (distinctAgg && xc == null) r.facts.add("There are " + Fmt.full(vals[0][0]) + " unique " + m.name + " values across " + r.matched + " rows" + matchedNote(r, p) + ".");
+            else facts(r, p, xc, timeX && !weekday, xb, xs, ss, vals, agg, measure, m, matchedNote(r, p));
+        }
+
+        static void perFacts(Result r, Plan p, Column pc, Column m, String inner, String agg, String measure, List<Double> vals, int entityTotal, double outerValue) {
+            String filt = matchedNote(r, p);
+            if (vals.isEmpty()) return;
+            double[] a = vals.stream().mapToDouble(Double::doubleValue).sorted().toArray();
+            int n = a.length;
+            double med = n % 2 == 1 ? a[n / 2] : (a[n / 2 - 1] + a[n / 2]) / 2;
+            String only = p.havingOp == null ? "" : " (only counting " + pc.name + " values whose " + innerPhrase(inner, m) + " is " + havingText(p) + ")";
+            if (agg.equals("count")) {
+                r.facts.add(Fmt.full(n) + " " + pc.name + " values" + (p.havingOp == null ? "" : " have " + innerPhrase(inner, m) + " " + havingText(p)) + filt + ".");
+                return;
+            }
+            boolean simple = inner.equals("sum") || inner.equals("count") || inner.equals("distinct");
+            String head = agg.equals("avg") ? (simple ? "The average " + innerPhrase(inner, m) + " per " + pc.name : "The average of each " + pc.name + "'s " + innerPhrase(inner, m)) : measure;
+            r.facts.add(head + " is " + Fmt.full(outerValue) + " across " + Fmt.full(n) + " " + pc.name + " values"
+                    + only + filt + ". " + (agg.equals("median") ? "" : "The median is " + Fmt.full(med) + ", ") + (agg.equals("median") ? "The values range" : "ranging") + " from "
+                    + Fmt.full(a[0]) + " to " + Fmt.full(a[n - 1]) + ".");
+            if (p.havingOp != null && entityTotal > 0)
+                r.facts.add(Fmt.full(n) + " of " + Fmt.full(entityTotal) + " " + pc.name + " values (" + Fmt.share((double) n / entityTotal) + ") meet that condition.");
+        }
+
+
+        record CalcOut(double[][] vals, List<String> ss, String measure, String title, ChartType type, boolean sign) {}
+
+        static String pctText(double v) { return Double.isNaN(v) ? "n/a" : String.format(Locale.US, "%.1f%%", v); }
+
+        /** Running total, percent of total, growth and moving average, applied to an aggregated table. Null (with a note) when it doesn't make sense. */
+        static CalcOut applyCalc(Plan p, boolean timeNoWeekday, boolean timeX, String xb, String xName, List<String> xs, List<String> ss,
+                                 double[][] vals, String agg, String measure, Result r) {
+            int nx = xs.size(), ns = ss.size();
+            String per = xb == null ? "period" : xb;
+            String filt = matchedNote(r, p);
+            switch (p.calc) {
+                case "cumulative": {
+                    if (!additive(agg) && !agg.equals("distinct")) {
+                        r.facts.add("A running total only makes sense for totals or counts, so I showed the values as they are.");
+                        return null;
+                    }
+                    if (agg.equals("distinct")) {
+                        r.facts.add("A running total of unique counts would count the same value again in each period, so I showed the values as they are.");
+                        return null;
+                    }
+                    if (timeX) {
+                        double[][] out = new double[ns][nx];
+                        for (int si = 0; si < ns; si++) {
+                            double run = 0;
+                            for (int xi = 0; xi < nx; xi++) {
+                                run += nz0(vals[si][xi]);
+                                out[si][xi] = run;
+                            }
+                        }
+                        String lab = "Cumulative " + measure;
+                        List<String> names = ns == 1 ? new ArrayList<>(List.of(lab)) : ss;
+                        double all = 0;
+                        for (int si = 0; si < ns; si++) all += out[si][nx - 1];
+                        double[] tot = new double[nx];
+                        for (int xi = 0; xi < nx; xi++) for (int si = 0; si < ns; si++) tot[xi] += out[si][xi];
+                        int half = 0;
+                        while (half < nx - 1 && tot[half] < all / 2) half++;
+                        r.facts.add("The running total reaches " + Fmt.full(all) + " by " + xs.get(nx - 1) + (ns > 1 ? " across all " + ns + " groups" : "") + filt + ". Half of it ("
+                                + Fmt.full(all / 2) + ") had built up by " + xs.get(half) + ".");
+                        return new CalcOut(out, names, lab, "Cumulative " + measure.substring(0, 1).toLowerCase(Locale.ROOT) + measure.substring(1) + " by " + per, ChartType.LINE, false);
+                    }
+                    // categories: a Pareto view - cumulative share of the total, largest first
+                    double[] rowTot = new double[nx];
+                    double all = 0;
+                    for (int xi = 0; xi < nx; xi++) {
+                        for (int si = 0; si < ns; si++) rowTot[xi] += nz0(vals[si][xi]);
+                        all += rowTot[xi];
+                    }
+                    if (all <= 0) return null;
+                    double[][] out = new double[1][nx];
+                    double run = 0;
+                    int k80 = -1;
+                    for (int xi = 0; xi < nx; xi++) {
+                        run += rowTot[xi];
+                        out[0][xi] = run / all * 100;
+                        if (k80 < 0 && out[0][xi] >= 80) k80 = xi + 1;
+                    }
+                    r.facts.add("The largest " + xName + " value (" + xs.get(0) + ") is " + pctText(rowTot[0] / all * 100) + " of the total. " + (k80 > 0 ? "It takes the top " + k80 + " of " + nx
+                            + " " + xName + " values (" + pctText(100.0 * k80 / nx) + ") to pass 80% of the total." : "")
+                            + (nx < xs.size() ? "" : "") + filt);
+                    return new CalcOut(out, new ArrayList<>(List.of("Cumulative share of " + measure + " (%)")), "Cumulative share of " + measure + " (%)",
+                            "Cumulative share of " + measure.substring(0, 1).toLowerCase(Locale.ROOT) + measure.substring(1) + " by " + xName + " (%)", nx > 12 ? ChartType.HBAR : ChartType.BAR, false);
+                }
+                case "share": {
+                    if (!additive(agg)) {
+                        r.facts.add("Percent of total only makes sense for totals or counts, so I showed the values as they are.");
+                        return null;
+                    }
+                    for (double[] row : vals) for (double v : row) if (v < 0) {
+                        r.facts.add("Percent of total needs non-negative values, so I showed the values as they are.");
+                        return null;
+                    }
+                    double[][] out = new double[ns][nx];
+                    if (ns == 1) {
+                        double all = 0;
+                        for (double v : vals[0]) all += nz0(v);
+                        if (all <= 0) return null;
+                        for (int xi = 0; xi < nx; xi++) out[0][xi] = nz0(vals[0][xi]) / all * 100;
+                        int top3 = Math.min(3, nx);
+                        double t3 = 0;
+                        for (int xi = 0; xi < top3; xi++) t3 += out[0][xi];
+                        int hi = 0;
+                        for (int xi = 1; xi < nx; xi++) if (out[0][xi] > out[0][hi]) hi = xi;
+                        r.facts.add(xs.get(hi) + " is the largest share at " + pctText(out[0][hi]) + " of " + Fmt.full(all) + filt + (nx >= 4 ? "; the first " + top3 + " shown together make up " + pctText(t3) + "." : "."));
+                        String lab = "Share of " + measure + " (%)";
+                        return new CalcOut(out, new ArrayList<>(List.of(lab)), lab, "Share of " + measure.substring(0, 1).toLowerCase(Locale.ROOT) + measure.substring(1) + " by " + (timeX ? per : xName) + " (%)", null, false);
+                    }
+                    double[] rowTot = new double[nx];
+                    for (int xi = 0; xi < nx; xi++) for (int si = 0; si < ns; si++) rowTot[xi] += nz0(vals[si][xi]);
+                    for (int si = 0; si < ns; si++) for (int xi = 0; xi < nx; xi++) out[si][xi] = rowTot[xi] == 0 ? 0 : nz0(vals[si][xi]) / rowTot[xi] * 100;
+                    double[] ov = new double[ns];
+                    double all = 0;
+                    for (int si = 0; si < ns; si++) {
+                        for (int xi = 0; xi < nx; xi++) ov[si] += nz0(vals[si][xi]);
+                        all += ov[si];
+                    }
+                    int big = 0;
+                    for (int si = 1; si < ns; si++) if (ov[si] > ov[big]) big = si;
+                    r.facts.add("Each bar shows how that " + (timeX ? per : xName) + " splits across the groups (every bar adds up to 100%). Overall, " + ss.get(big) + " is the largest group at "
+                            + pctText(all == 0 ? 0 : ov[big] / all * 100) + filt + ".");
+                    return new CalcOut(out, ss, "Share of " + measure + " (%)", "Share of " + measure.substring(0, 1).toLowerCase(Locale.ROOT) + measure.substring(1) + " by " + (timeX ? per : xName) + " (%)", ChartType.STACK100, false);
+                }
+                case "growth": {
+                    if (!timeNoWeekday || nx < 2) {
+                        r.facts.add("Growth needs a time axis with at least two periods (for example \"revenue growth by month\"), so I showed the values as they are.");
+                        return null;
+                    }
+                    double[][] out = new double[ns][nx];
+                    for (int si = 0; si < ns; si++) {
+                        out[si][0] = Double.NaN;
+                        for (int xi = 1; xi < nx; xi++) {
+                            double a = vals[si][xi - 1], b = vals[si][xi];
+                            out[si][xi] = Double.isNaN(a) || Double.isNaN(b) || a == 0 ? Double.NaN : (b - a) / Math.abs(a) * 100;
+                        }
+                    }
+                    String lab = measure + " growth (%)";
+                    List<String> names = ns == 1 ? new ArrayList<>(List.of(lab)) : ss;
+                    if (ns == 1) {
+                        int hi = -1, lo = -1;
+                        double sum = 0;
+                        int cnt = 0;
+                        for (int xi = 1; xi < nx; xi++) {
+                            double g = out[0][xi];
+                            if (Double.isNaN(g)) continue;
+                            sum += g;
+                            cnt++;
+                            if (hi < 0 || g > out[0][hi]) hi = xi;
+                            if (lo < 0 || g < out[0][lo]) lo = xi;
+                        }
+                        if (cnt == 1) {
+                            r.facts.add("Compared with the previous " + per + ", " + measure + " changed " + String.format(Locale.US, "%+.1f%%", out[0][hi]) + " in " + xs.get(hi) + filt
+                                    + " (there are only two " + per + "s in the data, so this is the only growth figure).");
+                        } else if (cnt > 0) {
+                            double last = out[0][nx - 1];
+                            r.facts.add("Compared with the previous " + per + ", " + measure + " grew " + pctText(sum / cnt) + " on average" + filt + ". The strongest was " + xs.get(hi) + " ("
+                                    + String.format(Locale.US, "%+.1f%%", out[0][hi]) + ") and the weakest " + xs.get(lo) + " (" + String.format(Locale.US, "%+.1f%%", out[0][lo]) + ")."
+                                    + (Double.isNaN(last) ? "" : " The latest, " + xs.get(nx - 1) + ", was " + String.format(Locale.US, "%+.1f%%", last) + "."));
+                        }
+                    } else {
+                        StringBuilder sb = new StringBuilder("Latest " + per + " (" + xs.get(nx - 1) + ") compared with the previous one: ");
+                        for (int si = 0; si < ns; si++) sb.append(si > 0 ? ", " : "").append(ss.get(si)).append(" ").append(Double.isNaN(out[si][nx - 1]) ? "n/a" : String.format(Locale.US, "%+.1f%%", out[si][nx - 1]));
+                        r.facts.add(sb + filt + ".");
+                    }
+                    return new CalcOut(out, names, lab, measure + " growth by " + per + " (% change on the previous " + per + ")", ns == 1 ? ChartType.BAR : ChartType.LINE, ns == 1);
+                }
+                case "moving": {
+                    int w = p.window != null ? p.window : ("day".equals(xb) ? 7 : 3);
+                    if (!timeNoWeekday || nx < w + 1) {
+                        r.facts.add(!timeNoWeekday ? "A moving average needs a time axis (for example \"revenue by month, 3 month moving average\"), so I showed the values as they are."
+                                : "A " + w + "-" + per + " moving average needs more than " + w + " periods of data (there are " + nx + "), so I showed the values as they are.");
+                        return null;
+                    }
+                    double[][] ma = new double[ns][nx];
+                    for (int si = 0; si < ns; si++)
+                        for (int xi = 0; xi < nx; xi++) {
+                            if (xi < w - 1) { ma[si][xi] = Double.NaN; continue; }
+                            double sum = 0;
+                            boolean ok = true;
+                            for (int k = xi - w + 1; k <= xi; k++) {
+                                if (Double.isNaN(vals[si][k])) { ok = false; break; }
+                                sum += vals[si][k];
+                            }
+                            ma[si][xi] = ok ? sum / w : Double.NaN;
+                        }
+                    String lab = w + "-" + per + " moving average";
+                    double now = ma[0][nx - 1], before = ma[0][nx - 2];
+                    if (ns == 1) {
+                        r.facts.add("The " + w + "-" + per + " moving average of " + measure + " is " + Fmt.full(now) + " at " + xs.get(nx - 1) + (Double.isNaN(before) || before == 0 ? "" : ", "
+                                + (now >= before ? "up " : "down ") + pctText(Math.abs((now - before) / Math.abs(before) * 100)) + " from " + xs.get(nx - 2)) + filt + ". The latest actual value is " + Fmt.full(vals[0][nx - 1]) + ".");
+                        return new CalcOut(new double[][]{vals[0], ma[0]}, new ArrayList<>(List.of(measure, lab)), measure, measure + " with " + w + "-" + per + " moving average", ChartType.LINE, false);
+                    }
+                    r.facts.add("Each line is the " + w + "-" + per + " moving average of " + measure + " for one group, which smooths out short-term swings" + filt + ".");
+                    return new CalcOut(ma, ss, measure, w + "-" + per + " moving average of " + measure.substring(0, 1).toLowerCase(Locale.ROOT) + measure.substring(1) + " by " + per, ChartType.LINE, false);
+                }
+                default:
+                    return null;
+            }
+        }
+
+        record Ent(String name, double value, int rows) {}
+
+        /** "Which customers spent over 1,000?", "top 10 customers by revenue", "how many customers ordered more than once?" */
+        static void entities(DataTable t, Plan p, boolean[] keep, Result r) throws AnalysisException {
+            Column pc = need(t, p.per != null ? p.per : p.x, "entity column");
+            Column m = metricOf(t, p);
+            String inner = innerOf(p, m);
+            if (!inner.equals("count") && !inner.equals("distinct") && (m == null || m.type != ColType.NUMBER))
+                throw new AnalysisException("Say what to measure for each " + pc.name + ", for example the total of a numeric column. Numeric columns: "
+                        + t.colsOfType(ColType.NUMBER).stream().map(x -> x.name).toList() + ".");
+            Map<String, Acc> ents = new LinkedHashMap<>();
+            Map<String, Integer> rowCount = new HashMap<>();
+            for (int i = 0; i < t.rows; i++) {
+                if (!keep[i]) continue;
+                String ek = key(pc, i, null);
+                if (ek == null) continue;
+                double v = 1;
+                String dv = null;
+                if (inner.equals("distinct")) {
+                    dv = m.text[i];
+                    if (dv == null || dv.isBlank()) continue;
+                    dv = dv.trim();
+                } else if (!inner.equals("count")) {
+                    v = m.num[i];
+                    if (Double.isNaN(v)) continue;
+                }
+                Acc a = ents.computeIfAbsent(ek, k -> new Acc());
+                if (dv != null) a.addDistinct(dv);
+                else a.add(v, inner.equals("median"));
+                rowCount.merge(ek, 1, Integer::sum);
+            }
+            List<Ent> all = new ArrayList<>();
+            double grand = 0;
+            for (var e : ents.entrySet()) {
+                double val = e.getValue().get(inner);
+                if (Double.isNaN(val)) continue;
+                all.add(new Ent(e.getKey(), val, rowCount.get(e.getKey())));
+                grand += val;
+            }
+            if (all.isEmpty()) throw new AnalysisException("There were no usable values for that combination of columns.");
+            List<Ent> hit = new ArrayList<>();
+            for (Ent e : all) if (passesHaving(p, e.value())) hit.add(e);
+            String label = Character.toUpperCase(innerPhrase(inner, m).charAt(0)) + innerPhrase(inner, m).substring(1);
+            if (hit.isEmpty())
+                throw new AnalysisException("No " + pc.name + " value has " + innerPhrase(inner, m) + " " + havingText(p) + ". The highest is "
+                        + Fmt.full(all.stream().mapToDouble(Ent::value).max().orElse(0)) + ".");
+            boolean asc = "asc".equals(p.sort);
+            hit.sort(asc ? Comparator.comparingDouble(Ent::value) : Comparator.comparingDouble(Ent::value).reversed());
+            int lim = p.limit != null ? p.limit : 20;
+            List<Ent> shown = hit.subList(0, Math.min(lim, hit.size()));
+            boolean share = (inner.equals("sum") || inner.equals("count")) && grand > 0;
+
+            r.headers.add(pc.name);
+            r.headers.add(label);
+            r.headers.add("Rows");
+            if (share) r.headers.add("Share of total");
+            for (Ent e : shown) {
+                List<String> row = new ArrayList<>(List.of(e.name(), Fmt.full(e.value()), String.valueOf(e.rows())));
+                if (share) row.add(Fmt.share(e.value() / grand));
+                r.rows.add(row.toArray(new String[0]));
+            }
+            String cond = p.havingOp == null ? "" : " " + havingText(p);
+            r.title = p.title != null ? p.title
+                    : (p.havingOp != null ? pc.name + " values with " + innerPhrase(inner, m) + cond
+                    : (asc ? "Lowest " : "Top ") + Math.min(lim, hit.size()) + " " + pc.name + " by " + innerPhrase(inner, m));
+
+            int chartN = Math.min(shown.size(), 15);
+            ChartData cd = new ChartData();
+            cd.type = ChartType.HBAR;
+            cd.title = r.title;
+            cd.yLabel = label;
+            cd.series = new ArrayList<>(List.of(label));
+            double[] v = new double[chartN];
+            for (int i = 0; i < chartN; i++) {
+                cd.labels.add(shown.get(i).name());
+                v[i] = shown.get(i).value();
+            }
+            cd.values.add(v);
+            if (chartN >= 1) r.charts.add(cd);
+
+            // ---- facts
+            String filt = matchedNote(r, p);
+            int M = all.size();
+            if (p.havingOp != null) {
+                r.facts.add(Fmt.full(hit.size()) + " of " + Fmt.full(M) + " " + pc.name + " values (" + Fmt.share((double) hit.size() / M) + ") have " + innerPhrase(inner, m) + " " + havingText(p) + filt + ".");
+                if (share) {
+                    double part = 0;
+                    for (Ent e : hit) part += e.value();
+                    r.facts.add("Together they account for " + Fmt.full(part) + " of " + Fmt.full(grand) + " (" + Fmt.share(part / grand) + ").");
+                }
+            } else {
+                double top = 0;
+                for (Ent e : shown) top += e.value();
+                r.facts.add("There are " + Fmt.full(M) + " " + pc.name + " values" + filt + ". " + (asc ? "The lowest " : "The top ") + shown.size() + " have " + innerPhrase(inner, m) + " from "
+                        + Fmt.full(shown.get(0).value()) + (shown.size() > 1 ? " to " + Fmt.full(shown.get(shown.size() - 1).value()) : "")
+                        + (share ? ", " + Fmt.share(top / grand) + " of the total" : "") + ".");
+                if (hit.size() > shown.size() && p.limit == null) r.facts.add("Showing " + shown.size() + " of " + Fmt.full(hit.size()) + "; say \"top 50\" to see more.");
+            }
+            if (inner.equals("count") && p.havingOp == null) {
+                int once = 0;
+                for (Ent e : all) if (e.value() == 1) once++;
+                r.facts.add(Fmt.full(once) + " of " + Fmt.full(M) + " " + pc.name + " values (" + Fmt.share((double) once / M) + ") appear only once.");
+            }
         }
 
         static String matchedNote(Result r, Plan p) {
@@ -5637,7 +6288,8 @@ public class DataChat extends JFrame {
                     || (WEAK.matcher(qn).find() && words <= 3)
                     || (has(qn, " (that|it|those|them|these|same|previous|earlier|above) ") && words <= 12)
                     || (has(qn, " (only|just) ") && words <= 6)
-                    || (has(qn, " (instead|rather|again) ") && words <= 8);
+                    || (has(qn, " (instead|rather|again) ") && words <= 8)
+                    || (f.calc != null && words <= 8 && prev.intent.equals("aggregate") && (f.x == null || f.x.equalsIgnoreCase(prev.x)));
             if (!follow) return f;
             Plan m = followUp(qn, t, prev, f);
             return m != null ? m : f;
@@ -5654,6 +6306,205 @@ public class DataChat extends JFrame {
         }
 
         /** Applies only what the follow-up explicitly says to a copy of the previous plan. Returns null if nothing was recognised. */
+
+        /**
+         * Recognises "how many unique customers", "average spend per customer", "customers who spent over 1,000",
+         * "top 10 customers by revenue". Returns the plan to use (intent "entities" is final; "aggregate" continues
+         * with the normal grouping logic), or null when the question isn't about entities.
+         */
+        static Plan entityPlan(String question, String qn, DataTable t, Plan p, List<Column> cats, String bucket) {
+            String q = " " + question.toLowerCase(Locale.ROOT).replaceAll("\\s+", " ") + " ";
+            // ---- which columns does the question mention as things?
+            Column ec = null;
+            int ecPos = Integer.MAX_VALUE;
+            String ecRx = null;
+            for (Column c : t.cols) {
+                if (!entityLike(c, t)) continue;
+                String rx = nounRegex(nounOf(c));
+                if (rx == null) continue;
+                Matcher m = Pattern.compile(" " + rx + " ").matcher(qn);
+                if (m.find() && m.start() < ecPos) {
+                    ecPos = m.start();
+                    ec = c;
+                    ecRx = rx;
+                }
+            }
+            Column metricCol = p.metric == null ? null : t.find(p.metric);
+            boolean metricNamed = metricCol != null && p.message == null;
+            Column defMetric = metricCol != null ? metricCol : defaultMetric(t);   // "how many" blanks the metric; entity questions still need one
+
+            // ---- unique counts: "how many unique X", "number of different X", "distinct X by month"
+            Column dc = null;
+            int dcPos = Integer.MAX_VALUE;
+            for (Column c : t.cols) {
+                if (c.type == ColType.NUMBER && !c.name.toLowerCase(Locale.ROOT).matches(".*(id|code|key|zip|postcode).*")) continue;
+                String noun = c.type == ColType.TEXT ? nounOf(c) : null;
+                List<String> rxs = new ArrayList<>();
+                if (noun != null) rxs.add(nounRegex(noun));
+                String nm = norm(c.name).trim();
+                if (nm.length() >= 3) rxs.add(nounRegex(nm));
+                for (String rx : rxs) {
+                    if (rx == null) continue;
+                    Matcher qual = Pattern.compile(" (unique|distinct|different|separate|individual|uniquely) " + rx + " ").matcher(qn);
+                    if (qual.find() && qual.start() < dcPos) {
+                        dcPos = qual.start();
+                        dc = c;
+                    }
+                    if (entityLike(c, t)) {
+                        Matcher cnt = Pattern.compile(" (how many|number of|count of|count|total number of|no of) (the )?" + rx + " ").matcher(qn);
+                        if (cnt.find() && cnt.start() < dcPos) {
+                            dcPos = cnt.start();
+                            dc = c;
+                        }
+                    }
+                }
+            }
+            boolean perCue = ec != null && Pattern.compile(" per (" + ecRx + ") ").matcher(qn).find();
+            boolean byCue = ec != null && Pattern.compile(" (by|for each|each|across|per each|broken down by|grouped by) (" + ecRx + ") ").matcher(qn).find();
+
+            // ---- "customers who spent over 1000", "customers with more than 3 orders", "customers who ordered more than once"
+            if (ec != null) {
+                Matcher hv = Pattern.compile("(?:" + ecRx + ")\\s+(?:who |that |which |with |having |have |has |had )?(?:(?:spent|spend|bought|purchased|paid|ordered|generated|made|placed|contributed|worth|totalling|totaling)\\s+)?"
+                        + "(more than|over|above|at least|greater than|under|below|less than|fewer than|at most|exactly|>=|<=|>|<|=)\\s*[$\u00A3\u20AC]?\\s*(\\d[\\d,]*(?:\\.\\d+)?)\\s*(k|m)?\\b\\s*(orders?|transactions?|purchases?|times|items?|units?|rows?|visits?|sales|records?|entries)?").matcher(q);
+                String hop = null;
+                double hval = 0;
+                boolean hasCountWord = false, found = false;
+                if (hv.find()) {
+                    hop = opOf(hv.group(1));
+                    hval = Double.parseDouble(hv.group(2).replace(",", ""));
+                    if ("k".equals(hv.group(3))) hval *= 1000;
+                    if ("m".equals(hv.group(3))) hval *= 1_000_000;
+                    hasCountWord = hv.group(4) != null;
+                    found = true;
+                } else {
+                    Matcher once = Pattern.compile("(?:" + ecRx + ")\\s+(?:who |that |which |with |having |have |has |had )?(?:(?:only |just )?(?:ordered|bought|purchased|appear|appeared|shopped|visited|purchased|transacted)\\s+)?(more than once|multiple times|more than one time|repeatedly|only once|just once|once only|once|exactly once|at least twice|twice|more than twice)").matcher(q);
+                    Matcher once2 = Pattern.compile("(repeat|returning|loyal) (?:" + ecRx + ")").matcher(q);
+                    if (once.find()) {
+                        String w = once.group(1);
+                        if (w.contains("only") || w.contains("just") || w.contains("exactly") || w.equals("once") || q.matches("(?s).*\\b(only|just) (ordered|bought|purchased|appear|appeared|shopped|visited|transacted) once.*")) { hop = "="; hval = 1; }
+                        else if (w.equals("at least twice") || w.equals("twice")) { hop = ">="; hval = 2; }
+                        else if (w.equals("more than twice")) { hop = ">"; hval = 2; }
+                        else { hop = ">"; hval = 1; }
+                        hasCountWord = true;
+                        found = true;
+                    } else if (once2.find()) {
+                        hop = ">";
+                        hval = 1;
+                        hasCountWord = true;
+                        found = true;
+                    }
+                }
+                if (found) {
+                    Plan e = freshEntityBase(p, ec);
+                    e.havingOp = hop;
+                    e.havingVal = hval;
+                    boolean orderish = hasCountWord || has(qn, " (orders|transactions|purchases|visits|times) ");
+                    if (orderish) {
+                        e.inner = "count";
+                        e.metric = null;
+                    } else {
+                        e.inner = "sum";
+                        if (defMetric == null) return null;
+                        e.metric = defMetric.name;
+                    }
+                    if (e.sort.equals("none")) e.sort = "desc";
+                    return e;
+                }
+            }
+
+            // ---- two-stage: "average spend per customer", "orders per customer", "average order value per customer by region"
+            if (ec != null && perCue) {
+                p.per = ec.name;
+                cats.remove(ec);
+                boolean countWord = has(qn, " (orders|transactions|purchases|visits|sales|rows|records|entries|lines|bookings) ")
+                        && !(metricCol != null && mention(qn, metricCol.name) >= 0);
+                boolean orderValue = has(qn, " (order|transaction|purchase|basket|ticket|sale) (value|size|amount|total)s? ") || has(qn, " average (order|transaction|purchase|sale) ");
+                if (countWord && !has(qn, " (spend|spent|revenue|value|amount|sales amount) ")) {
+                    p.inner = "count";
+                    p.metric = null;
+                } else if (dc != null && dc != ec) {
+                    p.inner = "distinct";
+                    p.metric = dc.name;
+                } else {
+                    p.inner = orderValue ? "avg" : "sum";
+                }
+                String outer = "avg";
+                if (has(qn, " median ")) outer = "median";
+                else if (has(qn, " (maximum|max|highest|most|largest|biggest) ")) outer = "max";
+                else if (has(qn, " (minimum|min|lowest|least|smallest) ")) outer = "min";
+                p.agg = outer;
+                if (p.inner.equals("sum") || p.inner.equals("avg")) {
+                    if (defMetric == null) return null;
+                    p.metric = defMetric.name;
+                }
+                p.sort = "none";
+                p.limit = null;
+                p.chart = "auto";
+                p.message = p.metric != null && p.message != null ? p.message : null;
+                return p;
+            }
+
+            // ---- rankings and lists of entities: "top 10 customers by revenue", "which customers spent the most", "customers by orders"
+            if (ec != null) {
+                boolean rank = has(qn, " (top|bottom|best|worst|biggest|largest|smallest|highest|lowest|most|least|leading|main|key|biggest) ");
+                boolean list = has(qn, " (which|list|show|give|who are|name) ") || byCue;
+                if (rank || (list && ecPos != Integer.MAX_VALUE) || byCue) {
+                    Plan e = freshEntityBase(p, ec);
+                    boolean orders = has(qn, " (orders|transactions|purchases|visits|how often|frequent|frequency|number of) ") && !has(qn, " (revenue|spend|spent|amount|sales value|value) ");
+                    if (orders || defMetric == null) {
+                        e.inner = "count";
+                        e.metric = null;
+                    } else {
+                        e.inner = "sum";
+                        e.metric = defMetric.name;
+                    }
+                    if (e.sort.equals("none")) e.sort = has(qn, " (bottom|worst|smallest|lowest|least) ") ? "asc" : "desc";
+                    if (e.limit == null && rank) e.limit = 10;
+                    return e;
+                }
+            }
+
+            // ---- unique counts
+            if (dc != null && dc != metricCol && (dc.type != ColType.NUMBER || true)) {
+                p.metric = dc.name;
+                p.agg = "distinct";
+                cats.remove(dc);
+                p.message = null;
+                if (p.limit != null && has(qn, " (top|bottom) ")) p.limit = p.limit;
+                return p;
+            }
+            return null;
+        }
+
+        static Column defaultMetric(DataTable t) {
+            List<Column> nums = t.colsOfType(ColType.NUMBER);
+            for (Column c : nums) if (c.name.toLowerCase(Locale.ROOT).matches(".*(amount|revenue|sales|total|price|value|cost|profit|income|spend|payment).*")) return c;
+            return nums.isEmpty() ? null : nums.get(0);
+        }
+
+        static String opOf(String w) {
+            return switch (w) {
+                case "more than", "over", "above", "greater than", ">" -> ">";
+                case "at least", ">=" -> ">=";
+                case "under", "below", "less than", "fewer than", "<" -> "<";
+                case "at most", "<=" -> "<=";
+                default -> "=";
+            };
+        }
+
+        static Plan freshEntityBase(Plan p, Column ec) {
+            Plan e = p.copy();
+            e.intent = "entities";
+            e.per = ec.name;
+            e.x = null;
+            e.series = null;
+            e.bucket = null;
+            e.chart = "none";
+            e.agg = "sum";
+            e.message = null;
+            return e;
+        }
+
         static Plan followUp(String qn, DataTable t, Plan prev, Plan fresh) {
             List<Column> nums = t.colsOfType(ColType.NUMBER);
             boolean metricNamed = false;
@@ -5831,6 +6682,8 @@ public class DataChat extends JFrame {
                 }
             } else if (prev.intent.equals("drivers") && !groupNamed && !metricNamed && !aggWord && !chartWord && !dateFilter) {
                 // only the filters changed: keep the driver analysis
+            } else if (prev.intent.equals("entities") && !groupNamed && !metricNamed && !aggWord && !chartWord && fresh.calc == null && fresh.limit == null) {
+                // only the filters changed: keep the list of entities
             } else {
                 if (!p.intent.equals("aggregate")) {   // coming from a drivers / rows answer
                     if (!prev.intent.equals("drivers")) {
@@ -5884,6 +6737,20 @@ public class DataChat extends JFrame {
                     p.sort = fresh.sort;
                     notes.add(fresh.sort.equals("asc") ? "lowest first" : "highest first");
                 }
+                if (fresh.calc != null) {
+                    p.calc = fresh.calc;
+                    if (fresh.window != null) p.window = fresh.window;
+                    notes.add(switch (fresh.calc) {
+                        case "cumulative" -> "as a running total";
+                        case "share" -> "as percent of total";
+                        case "growth" -> "as growth on the previous period";
+                        default -> "with a moving average";
+                    });
+                } else if (p.calc != null && has(qn, " (raw|plain|actual|normal|original|absolute) (values|numbers|figures|amounts) | (not|without|remove|drop|stop) (the )?(cumulative|running|percent|percentage|growth|moving|share) ")) {
+                    p.calc = null;
+                    p.window = null;
+                    notes.add("back to the actual values");
+                }
                 if (chartWord) {
                     p.chart = fresh.chart;
                     notes.add(fresh.chart.equals("stacked") ? "as stacked bars" : fresh.chart.equals("stacked100") ? "as 100% stacked bars" : "as a " + fresh.chart + " chart");
@@ -5900,10 +6767,72 @@ public class DataChat extends JFrame {
             return p;
         }
 
+        // ---------------------------------------------------------------- entities: distinct counts and "per customer" questions
+        static final String ENTITY_WORDS = ".*(customer|cust|client|user|account|member|employee|staff|patient|student|person|people|supplier|vendor|seller|merchant|store|shop|branch|product|sku|item|invoice|ticket|visitor|company|household|donor|driver|campaign|session).*";
+
+        /** The singular words a column stands for: "CustomerID" -> "customer", "Product Code" -> "product". */
+        static String nounOf(Column c) {
+            String n = c.name.replaceAll("([a-z0-9])([A-Z])", "$1 $2").toLowerCase(Locale.ROOT).replaceAll("[^a-z0-9]+", " ").trim();
+            String[] w = n.split(" ");
+            int len = w.length;
+            if (len > 1 && w[len - 1].matches("id|ids|code|key|no|num|number|ref|identifier|name")) len--;
+            else if (len == 1 && w[0].matches("id|ids|code|key|no|num|number|ref|identifier|name")) return null;
+            return String.join(" ", Arrays.copyOf(w, len));
+        }
+
+        /** Regex (for the normalised question) that matches the noun in singular or plural. */
+        static String nounRegex(String noun) {
+            if (noun == null || noun.length() < 3) return null;
+            String[] w = noun.split(" ");
+            String last = w[w.length - 1];
+            String lastRx = last.endsWith("y") && last.length() > 3 ? Pattern.quote(last.substring(0, last.length() - 1)) + "(?:y|ies)" : Pattern.quote(last) + "(?:s|es)?";
+            StringBuilder sb = new StringBuilder();
+            for (int i = 0; i < w.length - 1; i++) sb.append(Pattern.quote(w[i])).append(" ");
+            return sb.append(lastRx).toString();
+        }
+
+        /** Text columns that identify "things" (customers, products...) rather than a handful of categories or unique row keys. */
+        static boolean entityLike(Column c, DataTable t) {
+            if (c.type != ColType.TEXT) return false;
+            int nonBlank = 0;
+            for (String v : c.text) if (!v.isBlank()) nonBlank++;
+            int dc = c.distinctCount();
+            if (dc < 2 || nonBlank == 0 || dc >= 0.98 * nonBlank) return false;   // unique keys identify rows, not entities
+            return c.name.toLowerCase(Locale.ROOT).matches(ENTITY_WORDS) || (dc >= 40 && dc <= 0.9 * nonBlank);
+        }
+
+        /** Running total / percent of total / growth / moving average phrases. */
+        static void calcWords(String qn, Plan p, boolean hasTime) {
+            Matcher wm = Pattern.compile(" (\\d+)[ ]?(?:day|week|month|quarter|year|period)s? (?:moving|rolling|simple moving) ").matcher(qn);
+            Matcher wm2 = Pattern.compile(" (?:moving|rolling) (?:average|avg|mean) (?:of |over |with |window )?(?:a )?(?:window of )?(\\d+) ").matcher(qn);
+            if (has(qn, " (moving|rolling) (average|avg|mean|averages) ") || has(qn, " (smoothed|smoothing|smooth) ") && hasTime) {
+                p.calc = "moving";
+                if (wm.find()) p.window = Math.max(2, Math.min(60, Integer.parseInt(wm.group(1))));
+                else if (wm2.find()) p.window = Math.max(2, Math.min(60, Integer.parseInt(wm2.group(1))));
+            } else if (has(qn, " (cumulative|cumulatively|running total|running totals|running sum|accumulated|accumulating|year to date|ytd|pareto|cumulative share) ")) {
+                p.calc = "cumulative";
+            } else if (has(qn, " (percent|percentage|proportion|share|contribution|fraction) (of )?(the |all |overall )?(total|whole|sum|everything|all) ")
+                    || has(qn, " as (a )?(percent|percentage|proportion|share|fraction) ")
+                    || has(qn, " (percent|percentage) of total ")) {
+                p.calc = "share";
+            } else if (hasTime && has(qn, " (growth|grew|growing|grow|percent change|percentage change|pct change|rate of change|change in percent|period over period) ")) {
+                p.calc = "growth";
+            }
+        }
+
+        /** True when the question names a longer column that contains this column's name ("Days to ship" contains "Ship"). */
+        static boolean insideLongerMention(DataTable t, Column c, String qn) {
+            for (Column o : t.cols)
+                if (o != c && o.name.length() > c.name.length() && o.name.toLowerCase(Locale.ROOT).contains(c.name.toLowerCase(Locale.ROOT)) && mention(qn, o.name) >= 0) return true;
+            return false;
+        }
+
         static Plan fresh(String question, DataTable t) {
             String qn = norm(question);
             Plan p = new Plan();
             Column time = t.firstOfType(ColType.DATE);
+            for (Column c : t.cols)   // several date columns: the one the question names wins ("by ShipDate month")
+                if (c.type == ColType.DATE && c != time && mention(qn, c.name) >= 0 && !insideLongerMention(t, c, qn) && (time == null || mention(qn, time.name) < 0 || c.name.length() > time.name.length())) time = c;
             List<Column> nums = t.colsOfType(ColType.NUMBER);
             List<Column> cats = new ArrayList<>();
             for (Column c : t.cols) {
@@ -6035,6 +6964,10 @@ public class DataChat extends JFrame {
             else if (has(qn, " (monthly|per month|by month|each month|every month|month by month|month over month) ")) bucket = "month";
             else if (has(qn, " (quarterly|per quarter|by quarter|each quarter) ")) bucket = "quarter";
             else if (has(qn, " (yearly|annual|annually|per year|by year|each year|year over year) ")) bucket = "year";
+            if (bucket == null) for (Column dc0 : t.cols) if (dc0.type == ColType.DATE) {   // "by Date quarter", "per ShipDate month"
+                Matcher bm = Pattern.compile(" (?:by|per|each|every) " + Pattern.quote(norm(dc0.name).trim()) + " (day|week|month|quarter|year) ").matcher(qn);
+                if (bm.find()) bucket = bm.group(1);
+            }
             if (has(qn, " (weekday|weekdays|day of the week|day of week|days of the week|by weekday|each weekday) ")) bucket = "weekday";
             boolean timeWord = bucket != null || has(qn, " (over time|trend|trends|timeline|history|evolution|time series|across time) ");
 
@@ -6058,6 +6991,21 @@ public class DataChat extends JFrame {
             else if (has(qn, " (line|lines|trend|trends|over time) ")) p.chart = "line";
             else if (has(qn, " (bar|bars|column|columns|histogram) ")) p.chart = "bar";
 
+
+            // ---- table calculations
+            calcWords(qn, p, time != null);
+            if ("moving".equals(p.calc) && "avg".equals(p.agg)
+                    && !has(qn.replaceAll(" (moving|rolling) (average|avg|mean|averages) ", " "), " (average|avg|mean|typical|averaged) ")) p.agg = p.metric == null ? "count" : "sum";
+
+            // ---- entities: unique counts and per-customer questions
+            {
+                Plan ep = entityPlan(question, qn, t, p, cats, bucket);
+                if (ep != null) {
+                    if (ep.intent.equals("entities")) return ep;
+                    p = ep;
+                }
+            }
+
             // ---- forecast
             if (time != null && (has(qn, " (forecast\\w*|predict\\w*|projection|projections|projected|projecting|extrapolat\\w*|going forward|outlook) ")
                     || has(qn, " (next|coming|following|upcoming) (\\d+ )?(days?|weeks?|months?|quarters?|years?) "))) {
@@ -6080,6 +7028,7 @@ public class DataChat extends JFrame {
 
             // ---- compare two periods
             if (time != null && !has(qn, " (why|driving|driver|drivers|cause|caused|reason|reasons|behind|explain|what changed) ")
+                    && !("growth".equals(p.calc) && !has(qn, " (compare|compared|comparing|comparison|versus|vs|against|between) "))
                     && has(qn, " (compare|compared|comparing|comparison|versus|vs|against|difference between|differences between|year over year|yoy|year on year|"
                     + "month over month|mom|month on month|quarter over quarter|qoq|quarter on quarter|week over week|wow|week on week) ")) {
                 String[] pair = comparePeriods(qn, time);
@@ -6357,10 +7306,15 @@ public class DataChat extends JFrame {
 
                 Reply with ONE JSON object and nothing else (no prose, no markdown fences). Fields:
                 {
-                 "intent": "aggregate" | "drivers" | "rows" | "describe" | "correlate" | "anomalies" | "compare" | "forecast",
+                 "intent": "aggregate" | "drivers" | "rows" | "describe" | "correlate" | "anomalies" | "compare" | "forecast" | "entities",
                  "title": short chart title,
                  "metric": exact numeric column name, or null to count rows,
-                 "agg": "sum" | "avg" | "count" | "min" | "max" | "median",
+                 "agg": "sum" | "avg" | "count" | "min" | "max" | "median" | "distinct"  ("distinct" = number of unique values of "metric", which may then be ANY column, e.g. unique customers),
+                 "per": exact text column naming the entity for per-customer style questions (or null),
+                 "inner": how to combine each entity's rows first: "sum" | "avg" | "count" | "min" | "max" | "median" | "distinct" (only with "per"),
+                 "having": {"op": ">" | ">=" | "<" | "<=" | "=", "value": number} or null  (keeps only entities whose per-entity value passes; "entities" intent),
+                 "calc": "cumulative" | "share" | "growth" | "moving" | null  (table calculation on the aggregated result),
+                 "window": integer 2-60 for calc "moving" (periods in the moving average), else null,
                  "x": exact column name for the x-axis / grouping, or null for one overall number,
                  "bucket": "day" | "weekday" | "week" | "month" | "quarter" | "year" | null  (only when x or series is a date column; "weekday" = Mon..Sun),
                  "series": exact text column to split into several series, or null,
@@ -6392,6 +7346,13 @@ public class DataChat extends JFrame {
                 Use "drivers" instead when the user asks WHY something changed.
                 - "forecast": project a measure forward ("forecast revenue for the next 3 months", "where is this heading?"). Set x to the date column, bucket to the period size, \
                 limit to how many periods ahead (null = sensible default), metric and agg for the measure. The app fits the trend and any seasonality and draws the range.
+                - Unique counts: "how many different customers" => metric = the customer column, agg "distinct", x null. "Unique customers by month" => same with x = date, bucket "month".
+                - Per-entity (two-stage) questions: "average spend per customer" => per = customer column, metric = amount, inner "sum", agg "avg" (the app totals each customer first, then averages those totals). \
+                "orders per customer" => per = customer column, inner "count", agg "avg" (or "median"/"max"). Add x/series to break that down further ("by region").
+                - "entities": list or count the entities themselves: "top 10 customers by revenue" (per = customer column, metric, inner "sum", limit 10, sort "desc"), \
+                "how many customers spent over 3000" (add having {op ">", value 3000}), "customers who ordered more than once" (inner "count", having {op ">", value 1}).
+                - Table calculations ("calc") work on an aggregate with an x: "cumulative"/running total (categories => Pareto cumulative share, largest first), "share" = percent of total \
+                (with a series: each x split to 100%), "growth" = % change on the previous period (x must be a date), "moving" = moving average (x must be a date; set "window", default 3, or 7 for day).
                 - Use exact column names, and for text filters exact values from the column summary. Date filters use ISO text ("2026-03" or "2026-03-15") with ">=" / "<=" / "=".
                 - When the user does not name a measure, pick the most natural numeric column (money-like columns for revenue, sales, spend, transactions) with agg "sum".
                 - If the question refers to the previous question ("now split that by channel", "only North"), start from the previous plan and modify it.
@@ -6435,9 +7396,11 @@ public class DataChat extends JFrame {
             String sys = """
                     You turn a request for a calculated column into a formula over the table's numeric columns.
                     Reply with JSON only: {"name": "short column name", "formula": "..."} or {"error": "why it can't be done"}.
-                    Formula rules: use numeric column names exactly as written in the schema; operators + - * / ^ and parentheses; percentage literals like 10%; comparisons < > <= >= = !=;
+                    Formula rules: use numeric or date column names exactly as written in the schema; operators + - * / ^ and parentheses; percentage literals like 10%; comparisons < > <= >= = !=;
                     functions abs, round(x, decimals), floor, ceil, sqrt, ln, log, exp, min(a, b), max(a, b), pow(a, b), if(condition, valueIfTrue, valueIfFalse).
-                    "X as a percent of Y" is X / Y * 100. Use only columns that exist and are NUMBER. Never invent columns.""";
+                    Dates: year(d), month(d), quarter(d), day(d), weekday(d) (1 = Monday), week(d), dayofyear(d) give numbers; date - date = days; date + days = date; days_between(start, end); date literals like 2026-03-01.
+                    Bands: bands(Column, cut1, cut2, ...) gives a text label per row ("under 100", "100 to under 500", "500 and over") and must be the whole formula.
+                    "X as a percent of Y" is X / Y * 100. Use only columns that exist and are NUMBER or DATE. Never invent columns.""";
             String text = complete(sys, t.describe(false) + "\nRequest: " + request, 300);
             int a = text.indexOf('{'), b = text.lastIndexOf('}');
             if (a < 0 || b < a) throw new IOException("the model did not return a formula");
@@ -7219,6 +8182,7 @@ public class DataChat extends JFrame {
         static DataTable create() {
             Random rnd = new Random(42);
             Random r2 = new Random(7);   // separate stream: the original columns stay exactly as before
+            Random r3 = new Random(99);  // customer and shipping columns, also on their own stream
             double[] unitPrice = {60, 45, 130, 15};
             String[] regions = {"North", "South", "East", "West", "Central"};
             double[] regionW = {1.0, 1.25, 0.9, 1.1, 0.75};
@@ -7228,7 +8192,7 @@ public class DataChat extends JFrame {
             String[] channels = {"Online", "Retail", "Partner"};
             double[] chanW = {0.50, 0.30, 0.20};
             List<String[]> recs = new ArrayList<>();
-            recs.add(new String[]{"TransactionID", "Date", "Region", "Category", "Channel", "Status", "Amount", "Units", "Discount (%)"});
+            recs.add(new String[]{"TransactionID", "Date", "Region", "Category", "Channel", "Status", "Amount", "Units", "Discount (%)", "CustomerID", "ShipDate"});
             int id = 10000;
             LocalDate start = LocalDate.of(2026, 1, 1), end = LocalDate.of(2026, 6, 30);
             long span = ChronoUnit.DAYS.between(start, end);
@@ -7252,7 +8216,9 @@ public class DataChat extends JFrame {
                     int units = (int) Math.max(1, Math.round(amount / unitPrice[ci] * Math.exp(0.12 * r2.nextGaussian())));
                     double disc = Math.max(0, Math.min(30, 2 + 0.5 * units + 3.5 * r2.nextGaussian()));
                     recs.add(new String[]{"T" + (id++), d.toString(), regions[ri], cats[ci], channels[chi], status,
-                            String.format(Locale.US, "%.2f", amount), String.valueOf(units), String.format(Locale.US, "%.1f", disc)});
+                            String.format(Locale.US, "%.2f", amount), String.valueOf(units), String.format(Locale.US, "%.1f", disc),
+                            String.format("C%04d", 1 + (int) (400 * Math.pow(r3.nextDouble(), 1.8))),
+                            d.plusDays(1 + Math.min(14, Math.round(Math.abs(r3.nextGaussian()) * 2.5))).toString()});
                 }
             }
             try {
@@ -7283,7 +8249,9 @@ public class DataChat extends JFrame {
                         "Any unusual transactions?",
                         "Compare Q1 with Q2 by region",
                         "Forecast revenue for the next 3 months",
-                        "Add column Price per unit = Amount / Units");
+                        "Average spend per customer",
+                        "Cumulative revenue by month",
+                        "Add column Days to ship = ShipDate - Date");
             }
             List<String> out = new ArrayList<>();
             out.add("Describe this data");
