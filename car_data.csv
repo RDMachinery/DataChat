@@ -1,0 +1,47 @@
+Manufacturer,Model,Category,Starting_Price_USD,Fuel_Type
+Acura,ADX,Compact Luxury SUV,34900,Gasoline
+Audi,A3,Compact Sedan,40100,Gasoline
+Audi,A5,Midsize Sedan,50200,Gasoline
+BMW,2 Series,Compact Coupe,40000,Gasoline
+BMW,3 Series,Compact Luxury Sedan,47500,Gasoline
+BMW,4 Series,Luxury Coupe,51200,Gasoline
+BMW,5 Series,Midsize Luxury Sedan,60500,Gasoline
+BMW,7 Series,Full-Size Luxury Sedan,99300,Gasoline
+BMW,8 Series,Grand Tourer,94500,Gasoline
+BMW,i4,Compact Electric Sedan,54200,Electric
+Chevrolet,Corvette,Sports Car,69995,Gasoline
+Chevrolet,Equinox EV,Compact Electric SUV,34995,Electric
+Chevrolet,Trax,Subcompact Crossover,22995,Gasoline
+FIAT,500e,Subcompact Electric,35700,Electric
+Ford,Explorer,Midsize SUV,40160,Gasoline
+Ford,Maverick,Compact Pickup,27895,Gasoline / Hybrid
+Ford,Mustang,Sports Car,32515,Gasoline
+Ford,Mustang Mach-E,Electric SUV,41630,Electric
+Honda,Civic,Compact Sedan,25990,Gasoline / Hybrid
+Honda,CR-V,Compact SUV,32370,Gasoline / Hybrid
+Honda,Passport,Midsize SUV,44790,Gasoline
+Hyundai,Elantra,Compact Sedan,24120,Gasoline / Hybrid
+Hyundai,Ioniq 5,Electric SUV,42500,Electric
+Hyundai,Santa Fe,Midsize 3-Row SUV,35350,Gasoline / Hybrid
+Hyundai,Tucson,Compact SUV,30800,Gasoline / Hybrid
+Kia,Carnival,Minivan,37500,Gasoline / Hybrid
+Kia,EV3,Subcompact Electric SUV,35000,Electric
+Kia,K4,Compact Sedan,23535,Gasoline
+Lexus,TX,Luxury 3-Row SUV,56490,Gasoline / Hybrid
+Mazda,Mazda3,Compact Hatchback/Sedan,25135,Gasoline
+Nissan,Kicks,Subcompact SUV,23220,Gasoline
+Nissan,Rogue,Compact SUV,30285,Gasoline
+Nissan,Sentra,Compact Sedan,23875,Gasoline
+Polestar,Polestar 4,Electric Crossover,56400,Electric
+Porsche,911,Sports Car,135500,Gasoline / Hybrid
+Ram,1500,Full-Size Pickup,42025,Gasoline
+Subaru,Crosstrek,Subcompact Crossover,28415,Gasoline
+Subaru,Forester,Compact SUV,31090,Gasoline
+Tesla,Model 3,Electric Sedan,38990,Electric
+Tesla,Model Y,Electric Crossover,44990,Electric
+Toyota,4Runner,Midsize Off-Road SUV,42270,Gasoline / Hybrid
+Toyota,Camry,Midsize Sedan,29495,Hybrid
+Toyota,Corolla,Compact Sedan,23300,Gasoline / Hybrid
+Toyota,RAV4,Compact SUV,30225,Gasoline / Hybrid
+Volkswagen,Golf GTI,Hot Hatchback,32995,Gasoline
+Volkswagen,Jetta,Compact Sedan,23295,Gasoline
