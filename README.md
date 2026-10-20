@@ -1,3 +1,7 @@
+![Splash screen](splash.jpeg)
+![Screenshot1](screenshot.jpeg)
+![Screenshot2](screenshot2.jpeg)
+
 # DataChat
 
 **Ask your CSV or Excel data questions in plain English and get an answer plus a chart.**
