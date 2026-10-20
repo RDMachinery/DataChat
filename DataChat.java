@@ -12,6 +12,7 @@ import javax.swing.table.AbstractTableModel;
 import javax.swing.table.DefaultTableModel;
 import java.awt.*;
 import java.awt.datatransfer.DataFlavor;
+import java.awt.event.MouseAdapter;
 import java.awt.event.MouseEvent;
 import java.awt.geom.*;
 import java.awt.image.BufferedImage;
@@ -29,6 +30,7 @@ import java.text.DecimalFormat;
 import java.time.Duration;
 import java.time.LocalDate;
 import java.time.format.DateTimeFormatter;
+import java.time.temporal.ChronoField;
 import java.time.temporal.ChronoUnit;
 import java.time.temporal.IsoFields;
 import java.util.*;
@@ -37,6 +39,12 @@ import java.util.function.Function;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.zip.DeflaterOutputStream;
+import java.util.zip.ZipEntry;
+import java.util.zip.ZipFile;
+import javax.xml.stream.XMLInputFactory;
+import javax.xml.stream.XMLStreamConstants;
+import javax.xml.stream.XMLStreamException;
+import javax.xml.stream.XMLStreamReader;
 
 /**
  * DataChat - load a CSV, ask questions in plain English, get an answer and a chart.
@@ -101,7 +109,14 @@ public class DataChat extends JFrame {
     private final JTabbedPane tabs = new JTabbedPane();
     private final JButton saveCsvBtn = new JButton("Save result as CSV...");
     private Result lastResult;
+    private Plan lastPlan;   // the plan behind the latest answer: lets the offline engine handle follow-ups
     private final JButton pdfBtn = new JButton("Export PDF report...");
+    private final JButton chartBtn = new JButton("Save chart as PNG...");
+    private final JCheckBox darkBox = new JCheckBox("Dark mode");
+    private boolean dark;
+    private static String lightLaf;
+    private final JButton copyBtn = new JButton("Copy chart");
+    private List<ChartData> shownCharts = List.of();
     private final List<ReportEntry> reportLog = new ArrayList<>();
     private List<Insight> insights = List.of();
 
@@ -121,7 +136,7 @@ public class DataChat extends JFrame {
         samplesBox.setToolTipText("Off by default: only column names, types and value summaries are sent to Claude.");
 
         // ---- toolbar
-        JButton load = new JButton("Load CSV...");
+        JButton load = new JButton("Load CSV / Excel...");
         load.addActionListener(e -> chooseFile());
         JButton demo = new JButton("Demo data");
         demo.addActionListener(e -> loadDemo());
@@ -134,6 +149,10 @@ public class DataChat extends JFrame {
         row1.add(demo);
         row1.add(Box.createHorizontalStrut(14));
         row1.add(pdfBtn);
+        row1.add(Box.createHorizontalStrut(14));
+        darkBox.setToolTipText("Dark colour scheme to reduce eye strain. Exports and PDF reports stay light.");
+        darkBox.addActionListener(e -> setDark(darkBox.isSelected(), true));
+        row1.add(darkBox);
         JPanel row2 = new JPanel(new FlowLayout(FlowLayout.LEFT, 8, 4));
         row2.add(new JLabel("Claude API key:"));
         row2.add(keyField);
@@ -174,10 +193,17 @@ public class DataChat extends JFrame {
         sendBtn.addActionListener(e -> ask(input.getText()));
 
         // ---- result tabs
-        JButton save = new JButton("Save chart as PNG...");
-        save.addActionListener(e -> saveChart());
+        chartBtn.setEnabled(false);
+        chartBtn.setToolTipText("Save the chart as a PNG image (right-click a chart for the same option)");
+        chartBtn.addActionListener(e -> exportCharts());
+        copyBtn.setEnabled(false);
+        copyBtn.setToolTipText("Copy the chart to the clipboard so you can paste it into a slide, email or document");
+        copyBtn.addActionListener(e -> {
+            if (!shownCharts.isEmpty()) ChartExport.copy(this, ChartExport.combined(shownCharts));
+        });
         JPanel chartBar = new JPanel(new FlowLayout(FlowLayout.RIGHT, 6, 2));
-        chartBar.add(save);
+        chartBar.add(copyBtn);
+        chartBar.add(chartBtn);
         JPanel chartTab = new JPanel(new BorderLayout());
         chartTab.add(chartBar, BorderLayout.NORTH);
         chartHost.setBackground(Color.WHITE);
@@ -240,6 +266,66 @@ public class DataChat extends JFrame {
         left.setTransferHandler(th);
         tabs.setTransferHandler(th);
         updateStatus();
+
+        lightLaf = UIManager.getLookAndFeel().getClass().getName();
+        boolean wantDark = false;
+        try {
+            wantDark = java.util.prefs.Preferences.userNodeForPackage(DataChat.class).getBoolean("darkMode", false);
+        } catch (Exception ignored) {
+            // preferences can be unavailable (locked-down systems): just start light
+        }
+        if (wantDark) {
+            darkBox.setSelected(true);
+            setDark(true, false);
+        }
+    }
+
+    // ---------------------------------------------------------------- dark mode
+    /** A dark Metal colour theme (Metal draws everything from these few colours, so the whole UI follows). */
+    static final class DarkTheme extends javax.swing.plaf.metal.DefaultMetalTheme {
+        static final Color BG = new Color(0x1E1E1E);
+        private static final javax.swing.plaf.ColorUIResource
+                P1 = new javax.swing.plaf.ColorUIResource(0x7AA2D8), P2 = new javax.swing.plaf.ColorUIResource(0x3D5A80), P3 = new javax.swing.plaf.ColorUIResource(0x35516F),
+                S1 = new javax.swing.plaf.ColorUIResource(0x8A8A8A), S2 = new javax.swing.plaf.ColorUIResource(0x5A5A5A), S3 = new javax.swing.plaf.ColorUIResource(0x303234),
+                WHITE = new javax.swing.plaf.ColorUIResource(0x1E1E1E), BLACK = new javax.swing.plaf.ColorUIResource(0xE4E4E4),
+                DISABLED = new javax.swing.plaf.ColorUIResource(0x808080);
+
+        @Override public String getName() { return "DataChat Dark"; }
+        @Override protected javax.swing.plaf.ColorUIResource getPrimary1() { return P1; }
+        @Override protected javax.swing.plaf.ColorUIResource getPrimary2() { return P2; }
+        @Override protected javax.swing.plaf.ColorUIResource getPrimary3() { return P3; }
+        @Override protected javax.swing.plaf.ColorUIResource getSecondary1() { return S1; }
+        @Override protected javax.swing.plaf.ColorUIResource getSecondary2() { return S2; }
+        @Override protected javax.swing.plaf.ColorUIResource getSecondary3() { return S3; }
+        @Override protected javax.swing.plaf.ColorUIResource getWhite() { return WHITE; }
+        @Override protected javax.swing.plaf.ColorUIResource getBlack() { return BLACK; }
+        @Override public javax.swing.plaf.ColorUIResource getInactiveControlTextColor() { return DISABLED; }
+        @Override public javax.swing.plaf.ColorUIResource getControlDisabled() { return DISABLED; }
+    }
+
+    private void setDark(boolean on, boolean save) {
+        dark = on;
+        try {
+            if (on || (lightLaf != null && lightLaf.equals("javax.swing.plaf.metal.MetalLookAndFeel"))) {
+                javax.swing.plaf.metal.MetalLookAndFeel.setCurrentTheme(on ? new DarkTheme() : new javax.swing.plaf.metal.OceanTheme());
+                UIManager.setLookAndFeel(new javax.swing.plaf.metal.MetalLookAndFeel());
+            } else if (lightLaf != null) {
+                UIManager.setLookAndFeel(lightLaf);
+            }
+        } catch (Exception ex) {
+            say("Analyst", "I couldn't switch the colour scheme: " + esc(String.valueOf(ex.getMessage())), RED);
+        }
+        for (Window w : Window.getWindows()) SwingUtilities.updateComponentTreeUI(w);
+        chartHost.setBackground(on ? DarkTheme.BG : Color.WHITE);
+        renderChat();
+        showCharts(shownCharts);
+        if (save) {
+            try {
+                java.util.prefs.Preferences.userNodeForPackage(DataChat.class).putBoolean("darkMode", on);
+            } catch (Exception ignored) {
+                // not being able to remember the choice is harmless
+            }
+        }
     }
 
     private boolean useAI() {
@@ -268,7 +354,20 @@ public class DataChat extends JFrame {
     private void say(String who, String htmlBody, String color) {
         chatHtml.append("<div style='margin:6px 0 10px 0'><b style='color:").append(color).append("'>")
                 .append(who).append("</b><br>").append(htmlBody).append("</div>");
-        chat.setText("<html><body style='font-family:SansSerif;font-size:12px'>" + chatHtml + "</body></html>");
+        renderChat();
+    }
+
+    /** Rebuilds the transcript for the current colour scheme (the four text colours are swapped for readable dark-mode ones). */
+    private void renderChat() {
+        String html = chatHtml.toString();
+        String body = "font-family:SansSerif;font-size:12px";
+        String head = "";
+        if (dark) {
+            html = html.replace(BLUE, "#7fb2ff").replace(GREEN, "#6fd3a0").replace(RED, "#ff8a80").replace(GREY, "#a3a3a3");
+            body += ";color:#e4e4e4;background-color:#1e1e1e";
+            head = "<style>a{color:#8ab4f8}</style>";
+        }
+        chat.setText("<html><head>" + head + "</head><body style='" + body + "'>" + html + "</body></html>");
         SwingUtilities.invokeLater(() -> chat.setCaretPosition(chat.getDocument().getLength()));
     }
 
@@ -284,12 +383,22 @@ public class DataChat extends JFrame {
     // ---------------------------------------------------------------- loading data
     private void chooseFile() {
         JFileChooser fc = new JFileChooser(lastDir);
-        fc.setFileFilter(new FileNameExtensionFilter("CSV / TSV / text files", "csv", "tsv", "txt"));
+        fc.setFileFilter(new FileNameExtensionFilter("CSV, TSV, text and Excel files", "csv", "tsv", "txt", "xlsx", "xlsm"));
         if (fc.showOpenDialog(this) == JFileChooser.APPROVE_OPTION) loadFile(fc.getSelectedFile());
     }
 
     private void loadFile(File f) {
         lastDir = f.getParentFile();
+        ChartExport.dir = lastDir;
+        String lname = f.getName().toLowerCase(Locale.ROOT);
+        if (Xlsx.isExcel(f)) {
+            loadExcel(f);
+            return;
+        }
+        if (lname.endsWith(".xls")) {
+            say("Analyst", "<b>" + esc(f.getName()) + "</b> is an old-style Excel (.xls) file, which I can't read. Open it in Excel and use Save As &gt; Excel Workbook (.xlsx) or CSV, then load that.", RED);
+            return;
+        }
         setBusy(true, "Loading " + f.getName() + "...");
         new SwingWorker<DataTable, Void>() {
             protected DataTable doInBackground() throws Exception {
@@ -312,6 +421,69 @@ public class DataChat extends JFrame {
         }.execute();
     }
 
+    private void loadExcel(File f) {
+        setBusy(true, "Opening " + f.getName() + "...");
+        new SwingWorker<List<Xlsx.SheetRef>, Void>() {
+            protected List<Xlsx.SheetRef> doInBackground() throws Exception {
+                return Xlsx.sheets(f);
+            }
+
+            protected void done() {
+                List<Xlsx.SheetRef> all;
+                try {
+                    all = get();
+                } catch (Exception ex) {
+                    setBusy(false, null);
+                    excelError(ex);
+                    return;
+                }
+                setBusy(false, null);
+                List<Xlsx.SheetRef> visible = new ArrayList<>();
+                for (Xlsx.SheetRef s : all) if (!s.hidden()) visible.add(s);
+                if (visible.isEmpty()) visible = all;
+                Xlsx.SheetRef pick = visible.get(0);
+                if (visible.size() > 1) {
+                    String[] names = new String[visible.size()];
+                    for (int i = 0; i < names.length; i++) names[i] = visible.get(i).name();
+                    Object choice = JOptionPane.showInputDialog(DataChat.this, "\"" + f.getName() + "\" has " + names.length + " sheets. Which one should I load?",
+                            "Choose a sheet", JOptionPane.QUESTION_MESSAGE, null, names, names[0]);
+                    if (choice == null) return;
+                    pick = visible.get(Arrays.asList(names).indexOf(choice));
+                }
+                readSheet(f, pick, visible.size() > 1);
+            }
+        }.execute();
+    }
+
+    private void readSheet(File f, Xlsx.SheetRef sheet, boolean multi) {
+        setBusy(true, "Reading " + sheet.name() + "...");
+        new SwingWorker<DataTable, Void>() {
+            String note;
+
+            protected DataTable doInBackground() throws Exception {
+                Xlsx.Loaded l = Xlsx.read(f, sheet);
+                note = l.note();
+                return DataTable.fromRecords(f.getName() + (multi ? " [" + sheet.name() + "]" : ""), l.records());
+            }
+
+            protected void done() {
+                try {
+                    setTable(get(), false);
+                    if (note != null) say("Analyst", esc(note), GREY);
+                } catch (Exception ex) {
+                    excelError(ex);
+                } finally {
+                    setBusy(false, null);
+                }
+            }
+        }.execute();
+    }
+
+    private void excelError(Exception ex) {
+        Throwable c = ex.getCause() != null ? ex.getCause() : ex;
+        say("Analyst", "I couldn't read that workbook: " + esc(String.valueOf(c.getMessage())), RED);
+    }
+
     void loadDemo() {
         setTable(DemoData.create(), true);
     }
@@ -326,6 +498,7 @@ public class DataChat extends JFrame {
         reportLog.clear();
         pdfBtn.setEnabled(false);
         insights = List.of();
+        lastPlan = null;
         dataTable.setModel(new AbstractTableModel() {
             public int getRowCount() { return t.rows; }
             public int getColumnCount() { return t.cols.size(); }
@@ -414,6 +587,7 @@ public class DataChat extends JFrame {
         final Claude claude = ai ? new Claude(new String(keyField.getPassword()).trim(), modelField.getText().trim()) : null;
         final boolean samples = samplesBox.isSelected();
         final List<String[]> history = new ArrayList<>(turns);
+        final Plan prevPlan = lastPlan;
         setBusy(true, ai ? "Asking Claude..." : "Analysing...");
 
         new SwingWorker<Outcome, Void>() {
@@ -453,7 +627,7 @@ public class DataChat extends JFrame {
                 }
                 if (plan == null) {
                     try {
-                        plan = LocalPlanner.plan(q, t);
+                        plan = LocalPlanner.plan(q, t, prevPlan);
                         result = Engine.execute(t, plan);
                     } catch (AnalysisException ex) {
                         o.error = ex.getMessage();
@@ -484,6 +658,7 @@ public class DataChat extends JFrame {
                         say("Analyst", esc(o.error), RED);
                     } else {
                         showResult(o.plan, o.result);
+                        lastPlan = o.plan;
                         turns.add(new String[]{q, Json.write(o.plan.toJson())});
                         reportLog.add(new ReportEntry(q, o.answer.replace("**", ""), o.result, Engine.describeFilters(o.plan)));
                         pdfBtn.setEnabled(true);
@@ -518,16 +693,52 @@ public class DataChat extends JFrame {
     }
 
     private void showCharts(List<ChartData> charts) {
+        shownCharts = List.copyOf(charts);
+        chartBtn.setEnabled(!charts.isEmpty());
+        copyBtn.setEnabled(!charts.isEmpty());
         chartHost.removeAll();
         if (charts.isEmpty()) {
             JLabel l = new JLabel("No chart for this answer - see the Result table tab.", SwingConstants.CENTER);
             l.setForeground(Color.GRAY);
             chartHost.add(l);
         } else {
-            for (ChartData c : charts) chartHost.add(new ChartPanel(c));
+            for (ChartData c : charts) {
+                ChartPanel cp = new ChartPanel(c, c.basePlan == null ? null : (li, si) -> drill(c, li, si));
+                cp.setDark(dark);
+                chartHost.add(cp);
+            }
         }
         chartHost.revalidate();
         chartHost.repaint();
+    }
+
+    private void exportCharts() {
+        if (shownCharts.isEmpty()) return;
+        ChartExport.dir = lastDir;
+        if (shownCharts.size() == 1) {
+            File f = ChartExport.saveDialog(this, shownCharts.get(0));
+            if (f != null) {
+                lastDir = f.getParentFile();
+                say("Analyst", "Saved the chart to <b>" + esc(f.getName()) + "</b>.", GREEN);
+            }
+            return;
+        }
+        File base = ChartExport.choose(this, ChartExport.fileName(shownCharts.get(0)), "Save " + shownCharts.size() + " charts (a number is added to each file name)");
+        if (base == null) return;
+        String stem = base.getName().replaceFirst("(?i)\\.png$", "");
+        try {
+            StringBuilder names = new StringBuilder();
+            for (int i = 0; i < shownCharts.size(); i++) {
+                File f = new File(base.getParentFile(), stem + "-" + (i + 1) + ".png");
+                ChartExport.writePng(shownCharts.get(i), f);
+                names.append(i > 0 ? ", " : "").append(f.getName());
+            }
+            lastDir = base.getParentFile();
+            ChartExport.dir = lastDir;
+            say("Analyst", "Saved " + shownCharts.size() + " charts: <b>" + esc(names.toString()) + "</b>.", GREEN);
+        } catch (IOException ex) {
+            JOptionPane.showMessageDialog(this, "Could not save the charts: " + ex.getMessage());
+        }
     }
 
     private void saveCsv() {
@@ -577,24 +788,15 @@ public class DataChat extends JFrame {
         }
     }
 
-    private void saveChart() {
-        if (chartHost.getWidth() <= 0 || chartHost.getComponentCount() == 0) return;
-        JFileChooser fc = new JFileChooser(lastDir);
-        fc.setSelectedFile(new File("chart.png"));
-        if (fc.showSaveDialog(this) != JFileChooser.APPROVE_OPTION) return;
-        BufferedImage img = new BufferedImage(chartHost.getWidth(), chartHost.getHeight(), BufferedImage.TYPE_INT_RGB);
-        Graphics2D g = img.createGraphics();
-        g.setColor(Color.WHITE);
-        g.fillRect(0, 0, img.getWidth(), img.getHeight());
-        chartHost.paint(g);
-        g.dispose();
-        try {
-            File f = fc.getSelectedFile();
-            if (!f.getName().toLowerCase().endsWith(".png")) f = new File(f.getPath() + ".png");
-            ImageIO.write(img, "png", f);
-        } catch (IOException ex) {
-            JOptionPane.showMessageDialog(this, "Could not save: " + ex.getMessage());
+    /** A bar, point or slice was clicked: run the follow-up analysis it implies. */
+    private void drill(ChartData cd, int li, int si) {
+        if (table == null || !input.isEnabled()) return;
+        Drill.Drilled d = Drill.plan(table, cd, li, si);
+        if (d == null) {
+            say("Analyst", "I can't drill into that part of the chart.", GREY);
+            return;
         }
+        ask(d.question(), d.plan());
     }
 
     static void packColumns(JTable tb) {
@@ -901,6 +1103,530 @@ public class DataChat extends JFrame {
         }
     }
 
+    // =====================================================================================
+    //  Excel (.xlsx / .xlsm) reader: a small dependency-free parser (zip + streaming XML)
+    // =====================================================================================
+    static final class Xlsx {
+        record SheetRef(String name, String path, boolean hidden) {}
+
+        record Loaded(List<String[]> records, String note) {}
+
+        static final long MAX_SHEET_BYTES = 1L << 30;      // uncompressed XML limit (zip-bomb guard)
+        static final long MAX_SMALL_BYTES = 256L << 20;    // shared strings / styles / workbook
+        static final int MAX_ROWS = 1_000_000, MAX_COLS = 16_384;
+        static final String REL_NS = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
+
+        static boolean isExcel(File f) {
+            String n = f.getName().toLowerCase(Locale.ROOT);
+            return n.endsWith(".xlsx") || n.endsWith(".xlsm") || n.endsWith(".xltx") || n.endsWith(".xltm");
+        }
+
+        // ---------------------------------------------------------------- public API
+        static List<SheetRef> sheets(File f) throws IOException {
+            try (ZipFile z = open(f)) {
+                String wbPath = workbookPath(z);
+                Map<String, String> rels = relationships(z, relsPathFor(wbPath), wbPath);
+                List<SheetRef> out = new ArrayList<>();
+                try {
+                    XMLStreamReader r = factory().createXMLStreamReader(stream(z, wbPath, MAX_SMALL_BYTES));
+                    while (r.hasNext()) {
+                        if (r.next() != XMLStreamConstants.START_ELEMENT || !r.getLocalName().equals("sheet")) continue;
+                        String name = attr(r, "name"), id = relAttr(r), state = attr(r, "state");
+                        String target = id == null ? null : rels.get(id);
+                        if (name != null && target != null) out.add(new SheetRef(name, target, state != null && !state.equals("visible")));
+                    }
+                    r.close();
+                } catch (XMLStreamException e) {
+                    throw new IOException("The workbook structure is damaged: " + e.getMessage(), e);
+                }
+                if (out.isEmpty()) throw new IOException("This workbook has no worksheets.");
+                return out;
+            }
+        }
+
+        static Loaded read(File f, SheetRef sheet) throws IOException {
+            try (ZipFile z = open(f)) {
+                String wbPath = workbookPath(z);
+                Map<String, String> typeToPath = new HashMap<>();
+                relationshipsByType(z, relsPathFor(wbPath), wbPath, typeToPath);
+                boolean date1904 = false;
+                try {
+                    XMLStreamReader r = factory().createXMLStreamReader(stream(z, wbPath, MAX_SMALL_BYTES));
+                    while (r.hasNext()) {
+                        if (r.next() == XMLStreamConstants.START_ELEMENT && r.getLocalName().equals("workbookPr")) {
+                            String v = attr(r, "date1904");
+                            date1904 = v != null && (v.equals("1") || v.equalsIgnoreCase("true"));
+                            break;
+                        }
+                    }
+                    r.close();
+                } catch (XMLStreamException e) {
+                    throw new IOException("The workbook structure is damaged: " + e.getMessage(), e);
+                }
+                List<String> shared = typeToPath.containsKey("sharedStrings") ? sharedStrings(z, typeToPath.get("sharedStrings")) : List.of();
+                int[] kinds = typeToPath.containsKey("styles") ? styleKinds(z, typeToPath.get("styles")) : new int[0];
+                return parseSheet(z, sheet.path(), shared, kinds, date1904);
+            }
+        }
+
+        // ---------------------------------------------------------------- zip / xml plumbing
+        static ZipFile open(File f) throws IOException {
+            try {
+                return new ZipFile(f);
+            } catch (java.util.zip.ZipException e) {
+                try (java.io.InputStream in = Files.newInputStream(f.toPath())) {
+                    byte[] h = in.readNBytes(8);
+                    if (h.length >= 4 && (h[0] & 0xFF) == 0xD0 && (h[1] & 0xFF) == 0xCF && (h[2] & 0xFF) == 0x11 && (h[3] & 0xFF) == 0xE0)
+                        throw new IOException("This looks like an old Excel (.xls) file or a password-protected workbook. "
+                                + "Open it in Excel and use Save As > Excel Workbook (.xlsx) or CSV, then load that.");
+                }
+                throw new IOException("That file is not a valid .xlsx workbook (" + e.getMessage() + ").");
+            }
+        }
+
+        static XMLInputFactory factory() {
+            XMLInputFactory f = XMLInputFactory.newFactory();
+            f.setProperty(XMLInputFactory.SUPPORT_DTD, false);
+            f.setProperty(XMLInputFactory.IS_SUPPORTING_EXTERNAL_ENTITIES, false);
+            f.setProperty(XMLInputFactory.IS_REPLACING_ENTITY_REFERENCES, true);
+            return f;
+        }
+
+        static final class Limited extends java.io.FilterInputStream {
+            private long left;
+
+            Limited(java.io.InputStream in, long limit) {
+                super(in);
+                left = limit;
+            }
+
+            @Override
+            public int read() throws IOException {
+                if (left <= 0) throw new IOException("A part of the workbook is unreasonably large, so I stopped reading it.");
+                int b = super.read();
+                if (b >= 0) left--;
+                return b;
+            }
+
+            @Override
+            public int read(byte[] b, int off, int len) throws IOException {
+                if (left <= 0) throw new IOException("A part of the workbook is unreasonably large, so I stopped reading it.");
+                int n = super.read(b, off, (int) Math.min(len, left));
+                if (n > 0) left -= n;
+                return n;
+            }
+        }
+
+        static java.io.InputStream stream(ZipFile z, String path, long limit) throws IOException {
+            ZipEntry e = z.getEntry(path);
+            if (e == null) e = z.getEntry(path.startsWith("/") ? path.substring(1) : path);
+            if (e == null) throw new IOException("The workbook is missing \"" + path + "\".");
+            return new Limited(z.getInputStream(e), limit);
+        }
+
+        static String attr(XMLStreamReader r, String local) {
+            for (int i = 0; i < r.getAttributeCount(); i++) if (r.getAttributeLocalName(i).equals(local)) return r.getAttributeValue(i);
+            return null;
+        }
+
+        /** The r:id attribute, whatever prefix the file uses for the relationships namespace. */
+        static String relAttr(XMLStreamReader r) {
+            String v = r.getAttributeValue(REL_NS, "id");
+            return v != null ? v : attr(r, "id");
+        }
+
+        static String workbookPath(ZipFile z) throws IOException {
+            if (z.getEntry("_rels/.rels") != null) {
+                try {
+                    XMLStreamReader r = factory().createXMLStreamReader(stream(z, "_rels/.rels", MAX_SMALL_BYTES));
+                    while (r.hasNext()) {
+                        if (r.next() != XMLStreamConstants.START_ELEMENT || !r.getLocalName().equals("Relationship")) continue;
+                        String type = attr(r, "Type"), target = attr(r, "Target");
+                        if (type != null && target != null && type.endsWith("/officeDocument"))
+                            return target.startsWith("/") ? target.substring(1) : target;
+                    }
+                    r.close();
+                } catch (XMLStreamException ignored) {
+                    // fall through to the conventional location
+                }
+            }
+            if (z.getEntry("xl/workbook.xml") == null) throw new IOException("That file does not look like an Excel workbook (no xl/workbook.xml).");
+            return "xl/workbook.xml";
+        }
+
+        static String relsPathFor(String part) {
+            int s = part.lastIndexOf('/');
+            return (s < 0 ? "" : part.substring(0, s + 1)) + "_rels/" + part.substring(s + 1) + ".rels";
+        }
+
+        static String resolve(String basePart, String target) {
+            if (target.startsWith("/")) return target.substring(1);
+            int s = basePart.lastIndexOf('/');
+            String dir = s < 0 ? "" : basePart.substring(0, s + 1);
+            Deque<String> parts = new ArrayDeque<>();
+            for (String seg : (dir + target).split("/")) {
+                if (seg.equals("..")) {
+                    if (!parts.isEmpty()) parts.removeLast();
+                } else if (!seg.isEmpty() && !seg.equals(".")) parts.addLast(seg);
+            }
+            return String.join("/", parts);
+        }
+
+        /** relationship id -> resolved part path */
+        static Map<String, String> relationships(ZipFile z, String relsPath, String basePart) throws IOException {
+            Map<String, String> out = new HashMap<>();
+            if (z.getEntry(relsPath) == null) return out;
+            try {
+                XMLStreamReader r = factory().createXMLStreamReader(stream(z, relsPath, MAX_SMALL_BYTES));
+                while (r.hasNext()) {
+                    if (r.next() != XMLStreamConstants.START_ELEMENT || !r.getLocalName().equals("Relationship")) continue;
+                    String id = attr(r, "Id"), target = attr(r, "Target"), mode = attr(r, "TargetMode");
+                    if (id != null && target != null && !"External".equals(mode)) out.put(id, resolve(basePart, target));
+                }
+                r.close();
+            } catch (XMLStreamException e) {
+                throw new IOException("The workbook structure is damaged: " + e.getMessage(), e);
+            }
+            return out;
+        }
+
+        /** relationship type suffix (sharedStrings, styles, ...) -> part path */
+        static void relationshipsByType(ZipFile z, String relsPath, String basePart, Map<String, String> out) throws IOException {
+            if (z.getEntry(relsPath) == null) {
+                out.put("sharedStrings", "xl/sharedStrings.xml");
+                out.put("styles", "xl/styles.xml");
+                out.values().removeIf(p -> z.getEntry(p) == null);
+                return;
+            }
+            try {
+                XMLStreamReader r = factory().createXMLStreamReader(stream(z, relsPath, MAX_SMALL_BYTES));
+                while (r.hasNext()) {
+                    if (r.next() != XMLStreamConstants.START_ELEMENT || !r.getLocalName().equals("Relationship")) continue;
+                    String type = attr(r, "Type"), target = attr(r, "Target");
+                    if (type == null || target == null || "External".equals(attr(r, "TargetMode"))) continue;
+                    String kind = type.substring(type.lastIndexOf('/') + 1);
+                    if (kind.equals("sharedStrings") || kind.equals("styles")) out.put(kind, resolve(basePart, target));
+                }
+                r.close();
+            } catch (XMLStreamException e) {
+                throw new IOException("The workbook structure is damaged: " + e.getMessage(), e);
+            }
+        }
+
+        // ---------------------------------------------------------------- shared strings and styles
+        static String unescape(String s) {
+            if (s.indexOf("_x") < 0) return s;
+            Matcher m = Pattern.compile("_x([0-9A-Fa-f]{4})_").matcher(s);
+            StringBuilder sb = new StringBuilder();
+            while (m.find()) m.appendReplacement(sb, Matcher.quoteReplacement(String.valueOf((char) Integer.parseInt(m.group(1), 16))));
+            m.appendTail(sb);
+            return sb.toString();
+        }
+
+        static List<String> sharedStrings(ZipFile z, String path) throws IOException {
+            List<String> out = new ArrayList<>();
+            try {
+                XMLStreamReader r = factory().createXMLStreamReader(stream(z, path, MAX_SMALL_BYTES));
+                StringBuilder sb = null;
+                boolean inT = false;
+                int phantom = 0;
+                while (r.hasNext()) {
+                    int ev = r.next();
+                    if (ev == XMLStreamConstants.START_ELEMENT) {
+                        String n = r.getLocalName();
+                        if (n.equals("si")) sb = new StringBuilder();
+                        else if (n.equals("rPh")) phantom++;
+                        else if (n.equals("t") && sb != null && phantom == 0) inT = true;
+                    } else if (ev == XMLStreamConstants.CHARACTERS || ev == XMLStreamConstants.CDATA || ev == XMLStreamConstants.SPACE) {
+                        if (inT && sb != null) sb.append(r.getText());
+                    } else if (ev == XMLStreamConstants.END_ELEMENT) {
+                        String n = r.getLocalName();
+                        if (n.equals("t")) inT = false;
+                        else if (n.equals("rPh")) phantom--;
+                        else if (n.equals("si") && sb != null) {
+                            out.add(unescape(sb.toString()));
+                            sb = null;
+                        }
+                    }
+                }
+                r.close();
+            } catch (XMLStreamException e) {
+                throw new IOException("The workbook's text table is damaged: " + e.getMessage(), e);
+            }
+            return out;
+        }
+
+        static final int K_GENERAL = 0, K_DATE = 1, K_TIME = 2, K_PERCENT = 3;
+
+        static int builtinKind(int id) {
+            if (id == 9 || id == 10) return K_PERCENT;
+            if (id == 14 || (id >= 15 && id <= 17) || (id >= 27 && id <= 31) || (id >= 34 && id <= 36) || (id >= 50 && id <= 58)) return K_DATE;
+            if (id == 22 || id == 32 || id == 33) return K_DATE;   // date + time
+            if (id >= 18 && id <= 21) return K_TIME;
+            if (id >= 45 && id <= 47) return K_TIME;
+            return K_GENERAL;
+        }
+
+        static int formatKind(String code) {
+            StringBuilder sb = new StringBuilder();
+            boolean quote = false;
+            for (int i = 0; i < code.length(); i++) {
+                char c = code.charAt(i);
+                if (c == '"') quote = !quote;
+                else if (!quote) {
+                    if (c == '\\' || c == '_' || c == '*') i++;          // escaped / padding character
+                    else if (c == '[') {                                  // [Red], [$-409], [h]: keep elapsed-time markers only
+                        int e = code.indexOf(']', i);
+                        if (e < 0) break;
+                        String inner = code.substring(i + 1, e).toLowerCase(Locale.ROOT);
+                        if (inner.matches("h+|m+|s+")) sb.append(inner.charAt(0));
+                        i = e;
+                    } else sb.append(Character.toLowerCase(c));
+                }
+            }
+            String s = sb.toString();
+            if (s.equals("general")) return K_GENERAL;
+            boolean hasD = s.indexOf('d') >= 0 || s.indexOf('y') >= 0, hasT = s.indexOf('h') >= 0 || s.indexOf('s') >= 0;
+            boolean hasM = s.indexOf('m') >= 0;
+            if (hasD || (hasM && !hasT && s.indexOf('0') < 0 && s.indexOf('#') < 0)) return K_DATE;   // dd/mm, mmm-yy ...
+            if (hasT) return K_TIME;
+            if (s.indexOf('%') >= 0) return K_PERCENT;
+            return K_GENERAL;
+        }
+
+        /** Index = style index (cellXfs); value = how its numbers should be read. */
+        static int[] styleKinds(ZipFile z, String path) throws IOException {
+            Map<Integer, String> custom = new HashMap<>();
+            List<Integer> xfs = new ArrayList<>();
+            try {
+                XMLStreamReader r = factory().createXMLStreamReader(stream(z, path, MAX_SMALL_BYTES));
+                boolean inXfs = false;
+                while (r.hasNext()) {
+                    int ev = r.next();
+                    if (ev == XMLStreamConstants.START_ELEMENT) {
+                        String n = r.getLocalName();
+                        if (n.equals("numFmt")) {
+                            String id = attr(r, "numFmtId"), code = attr(r, "formatCode");
+                            if (id != null && code != null) custom.put(Integer.parseInt(id.trim()), code);
+                        } else if (n.equals("cellXfs")) inXfs = true;
+                        else if (n.equals("xf") && inXfs) {
+                            String id = attr(r, "numFmtId");
+                            xfs.add(id == null ? 0 : Integer.parseInt(id.trim()));
+                        }
+                    } else if (ev == XMLStreamConstants.END_ELEMENT && r.getLocalName().equals("cellXfs")) inXfs = false;
+                }
+                r.close();
+            } catch (XMLStreamException | NumberFormatException e) {
+                return new int[0];   // styles are a nicety: without them dates just show as serial numbers
+            }
+            int[] kinds = new int[xfs.size()];
+            for (int i = 0; i < kinds.length; i++) {
+                int id = xfs.get(i);
+                kinds[i] = custom.containsKey(id) ? formatKind(custom.get(id)) : builtinKind(id);
+            }
+            return kinds;
+        }
+
+        // ---------------------------------------------------------------- values
+        static String plainNumber(double v) {
+            if (Double.isNaN(v) || Double.isInfinite(v)) return "";
+            if (v == Math.rint(v) && Math.abs(v) < 1e15) return String.valueOf((long) v);
+            return new java.math.BigDecimal(v).round(new java.math.MathContext(15)).stripTrailingZeros().toPlainString();
+        }
+
+        static String formatValue(String raw, int kind, boolean date1904) {
+            double v;
+            try {
+                v = Double.parseDouble(raw.trim());
+            } catch (NumberFormatException e) {
+                return raw.trim();
+            }
+            if (Double.isNaN(v) || Double.isInfinite(v)) return "";
+            if (kind == K_PERCENT) return plainNumber(v * 100) + "%";
+            if (kind == K_DATE && v == 0) return "";   // an empty date cell stored as zero
+            if ((kind == K_DATE || kind == K_TIME) && v >= 0 && v < 2958466) {
+                long days = (long) Math.floor(v);
+                long secs = Math.round((v - days) * 86400);
+                if (secs >= 86400) {
+                    secs -= 86400;
+                    days++;
+                }
+                java.time.LocalTime time = java.time.LocalTime.ofSecondOfDay(secs);
+                if (days == 0 && !date1904) return time.toString().length() == 5 ? time + ":00" : time.toString();
+                LocalDate base = date1904 ? LocalDate.of(1904, 1, 1) : (days < 60 ? LocalDate.of(1899, 12, 31) : LocalDate.of(1899, 12, 30));
+                LocalDate d = base.plusDays(days);
+                if (secs == 0) return d.toString();
+                String hhmmss = time.toString().length() == 5 ? time + ":00" : time.toString();
+                return d + " " + hhmmss;
+            }
+            return plainNumber(v);
+        }
+
+        static int colIndex(String ref) {
+            int c = 0, i = 0;
+            while (i < ref.length() && Character.isLetter(ref.charAt(i))) {
+                c = c * 26 + (Character.toUpperCase(ref.charAt(i)) - 'A' + 1);
+                i++;
+            }
+            return c - 1;
+        }
+
+        static String colLetters(int idx) {
+            StringBuilder sb = new StringBuilder();
+            for (int n = idx + 1; n > 0; n = (n - 1) / 26) sb.insert(0, (char) ('A' + (n - 1) % 26));
+            return sb.toString();
+        }
+
+        // ---------------------------------------------------------------- the sheet itself
+        static Loaded parseSheet(ZipFile z, String path, List<String> shared, int[] kinds, boolean date1904) throws IOException {
+            List<String[]> rows = new ArrayList<>();
+            int maxCol = 0;
+            try {
+                XMLStreamReader r = factory().createXMLStreamReader(stream(z, path, MAX_SHEET_BYTES));
+                String[] cur = null;
+                int curCol = -1;
+                String type = null;
+                int style = 0;
+                StringBuilder val = new StringBuilder(), inline = new StringBuilder();
+                boolean inV = false, inT = false, inIs = false;
+                int phantom = 0;
+                while (r.hasNext()) {
+                    int ev = r.next();
+                    if (ev == XMLStreamConstants.START_ELEMENT) {
+                        String n = r.getLocalName();
+                        switch (n) {
+                            case "row" -> {
+                                cur = new String[16];
+                                curCol = -1;
+                            }
+                            case "c" -> {
+                                String ref = attr(r, "r");
+                                curCol = ref != null && !ref.isEmpty() ? colIndex(ref) : curCol + 1;
+                                type = attr(r, "t");
+                                String s = attr(r, "s");
+                                try {
+                                    style = s == null ? 0 : Integer.parseInt(s.trim());
+                                } catch (NumberFormatException e) {
+                                    style = 0;
+                                }
+                                val.setLength(0);
+                                inline.setLength(0);
+                            }
+                            case "v" -> inV = true;
+                            case "is" -> inIs = true;
+                            case "rPh" -> phantom++;
+                            case "t" -> {
+                                if (inIs && phantom == 0) inT = true;
+                            }
+                            default -> {
+                            }
+                        }
+                    } else if (ev == XMLStreamConstants.CHARACTERS || ev == XMLStreamConstants.CDATA || ev == XMLStreamConstants.SPACE) {
+                        if (inV) val.append(r.getText());
+                        else if (inT) inline.append(r.getText());
+                    } else if (ev == XMLStreamConstants.END_ELEMENT) {
+                        String n = r.getLocalName();
+                        switch (n) {
+                            case "v" -> inV = false;
+                            case "t" -> inT = false;
+                            case "is" -> inIs = false;
+                            case "rPh" -> phantom--;
+                            case "c" -> {
+                                if (cur != null && curCol >= 0 && curCol < MAX_COLS) {
+                                    String text = cellText(type, val.toString(), inline.toString(), style, shared, kinds, date1904);
+                                    if (!text.isEmpty()) {
+                                        if (curCol >= cur.length) cur = Arrays.copyOf(cur, Math.max(curCol + 1, cur.length * 2));
+                                        cur[curCol] = text;
+                                        maxCol = Math.max(maxCol, curCol + 1);
+                                    }
+                                }
+                            }
+                            case "row" -> {
+                                if (cur != null) {
+                                    boolean any = false;
+                                    for (String s : cur) if (s != null) { any = true; break; }
+                                    if (any) {
+                                        if (rows.size() >= MAX_ROWS) throw new IOException("That sheet has more than " + String.format(Locale.US, "%,d", MAX_ROWS) + " rows, which is more than DataChat will load.");
+                                        rows.add(cur);
+                                    }
+                                }
+                                cur = null;
+                            }
+                            default -> {
+                            }
+                        }
+                    }
+                }
+                r.close();
+            } catch (XMLStreamException e) {
+                throw new IOException("The worksheet is damaged: " + e.getMessage(), e);
+            }
+            return tidy(rows, maxCol);
+        }
+
+        static String cellText(String type, String v, String inline, int style, List<String> shared, int[] kinds, boolean date1904) {
+            String t = type == null ? "n" : type;
+            switch (t) {
+                case "s": {
+                    try {
+                        int i = Integer.parseInt(v.trim());
+                        return i >= 0 && i < shared.size() ? shared.get(i) : "";
+                    } catch (NumberFormatException e) {
+                        return "";
+                    }
+                }
+                case "inlineStr":
+                    return unescape(inline);
+                case "str":
+                    return unescape(v);
+                case "b":
+                    return v.trim().equals("1") ? "TRUE" : "FALSE";
+                case "e":
+                    return "";
+                case "d":
+                    return v.trim();
+                default: {
+                    if (v.isBlank()) return "";
+                    int kind = style >= 0 && style < kinds.length ? kinds[style] : K_GENERAL;
+                    return formatValue(v, kind, date1904);
+                }
+            }
+        }
+
+        /** Squares the grid up, drops empty columns, skips title rows above the header and names unlabelled columns. */
+        static Loaded tidy(List<String[]> rows, int maxCol) throws IOException {
+            if (rows.isEmpty() || maxCol == 0) throw new IOException("That sheet is empty.");
+            boolean[] used = new boolean[maxCol];
+            for (String[] r : rows) for (int c = 0; c < Math.min(r.length, maxCol); c++) if (r[c] != null) used[c] = true;
+            List<Integer> keep = new ArrayList<>();
+            for (int c = 0; c < maxCol; c++) if (used[c]) keep.add(c);
+            List<String[]> grid = new ArrayList<>();
+            int[] counts = new int[rows.size()];
+            for (int i = 0; i < rows.size(); i++) {
+                String[] src = rows.get(i), dst = new String[keep.size()];
+                for (int k = 0; k < dst.length; k++) {
+                    int c = keep.get(k);
+                    String s = c < src.length ? src[c] : null;
+                    dst[k] = s == null ? "" : s;
+                    if (s != null) counts[i]++;
+                }
+                grid.add(dst);
+            }
+            // title rows: leading rows holding far fewer cells than the table that follows them
+            Map<Integer, Integer> freq = new HashMap<>();
+            for (int i = 0; i < Math.min(grid.size(), 60); i++) freq.merge(counts[i], 1, Integer::sum);
+            int modal = 0, best = 0;
+            for (var e : freq.entrySet()) if (e.getValue() > best || (e.getValue() == best && e.getKey() > modal)) { best = e.getValue(); modal = e.getKey(); }
+            int start = 0;
+            if (modal >= 2) while (start < grid.size() - 1 && counts[start] * 2 < modal) start++;
+            String note = start > 0 ? "Skipped " + start + " row" + (start == 1 ? "" : "s") + " above the header (they look like a title or notes)." : null;
+            List<String[]> out = new ArrayList<>(grid.subList(start, grid.size()));
+            String[] head = out.get(0);
+            for (int k = 0; k < head.length; k++) if (head[k].isBlank()) head[k] = "Column " + colLetters(keep.get(k));
+            return new Loaded(out, note);
+        }
+    }
+
     static List<String[]> parseCsv(String text) {
         // delimiter sniffing on the first line
         int eol = text.indexOf('\n');
@@ -968,7 +1694,7 @@ public class DataChat extends JFrame {
         static Plan fromJson(Map<String, Object> m) {
             Plan p = new Plan();
             String in = lower(nz(m.get("intent")));
-            p.intent = in != null && Set.of("aggregate", "drivers", "rows", "describe").contains(in) ? in : "aggregate";
+            p.intent = in != null && Set.of("aggregate", "drivers", "rows", "describe", "correlate", "anomalies").contains(in) ? in : "aggregate";
             p.title = nz(m.get("title"));
             p.metric = nz(m.get("metric"));
             String a = lower(nz(m.get("agg")));
@@ -1035,6 +1761,26 @@ public class DataChat extends JFrame {
             return m;
         }
 
+        Plan copy() {
+            Plan c = new Plan();
+            c.intent = intent;
+            c.title = title;
+            c.metric = metric;
+            c.agg = agg;
+            c.x = x;
+            c.bucket = bucket;
+            c.series = series;
+            c.sort = sort;
+            c.chart = chart;
+            c.from = from;
+            c.to = to;
+            c.direction = direction;
+            c.message = message;
+            c.limit = limit;
+            for (Filter f : filters) c.filters.add(new Filter(f.column(), f.op(), new ArrayList<>(f.values())));
+            return c;
+        }
+
         static String lower(String s) { return s == null ? null : s.toLowerCase(Locale.ROOT); }
 
         static String nz(Object o) {
@@ -1045,7 +1791,7 @@ public class DataChat extends JFrame {
         }
     }
 
-    enum ChartType { BAR, HBAR, LINE, PIE }
+    enum ChartType { BAR, HBAR, LINE, PIE, SCATTER }
 
     static final class ChartData {
         ChartType type = ChartType.BAR;
@@ -1055,6 +1801,15 @@ public class DataChat extends JFrame {
         List<double[]> values = new ArrayList<>();
         boolean signColors;
         Set<Integer> highlight = new HashSet<>();
+        // ---- scatter plots: one x/y array per series, plus the fitted line {slope, intercept, r, n}
+        List<double[]> sx = new ArrayList<>(), sy = new ArrayList<>();
+        double[] fit;
+        // ---- drill-down context (what a click on a bar / point / slice means)
+        Plan basePlan;                              // the plan that produced this chart (null = not drillable)
+        boolean periodX;                            // x labels are time periods
+        String timeCol, bucket;
+        List<List<Filter>> labelFilters;            // per x label: the filters that select it (category charts)
+        List<List<Filter>> seriesFilters;           // per series: the filters that select it
     }
 
     static final class Result {
@@ -1171,7 +1926,7 @@ public class DataChat extends JFrame {
         }
     }
 
-    record DriverRow(int level, String label, double from, double to, double delta, double excess, double share) {}
+    record DriverRow(int level, String label, double from, double to, double delta, double excess, double share, List<Filter> filters) {}
 
     static final class Engine {
         static Result execute(DataTable t, Plan p) throws AnalysisException {
@@ -1187,6 +1942,8 @@ public class DataChat extends JFrame {
                 case "describe" -> describe(t, keep, r);
                 case "rows" -> rows(t, p, keep, r);
                 case "drivers" -> drivers(t, p, keep, r);
+                case "correlate" -> correlate(t, p, keep, r);
+                case "anomalies" -> anomalies(t, p, keep, r);
                 default -> aggregate(t, p, keep, r);
             }
             if (p.message != null) r.facts.add(p.message);
@@ -1353,6 +2110,396 @@ public class DataChat extends JFrame {
                     }
                 }
             }
+        }
+
+        // ------------------------------------------------------------ anomalies
+        static final double ANOMALY_Z = 3.5;
+        static final int MIN_GROUP = 8, MIN_PERIODS = 8;
+
+        static double medianOf(double[] a) {
+            if (a.length == 0) return Double.NaN;
+            double[] s = a.clone();
+            Arrays.sort(s);
+            int n = s.length;
+            return n % 2 == 1 ? s[n / 2] : (s[n / 2 - 1] + s[n / 2]) / 2;
+        }
+
+        static double quantile(double[] sorted, double q) {
+            double pos = q * (sorted.length - 1);
+            int lo = (int) Math.floor(pos), hi = (int) Math.ceil(pos);
+            return sorted[lo] + (sorted[hi] - sorted[lo]) * (pos - lo);
+        }
+
+        record Scored(double[] score, double typical, boolean logScale) {}
+
+        /**
+         * Robust z-scores based on the median and the median absolute deviation (Iglewicz-Hoaglin), so the outliers
+         * themselves cannot hide the spread. All-positive, right-skewed columns (money) are judged on a log scale.
+         * Returns null when the values have no spread at all, i.e. no test is meaningful.
+         */
+        static Scored robustScores(double[] x) {
+            int n = x.length;
+            double sum = 0;
+            boolean positive = true;
+            for (double v : x) {
+                sum += v;
+                if (!(v > 0)) positive = false;
+            }
+            double med = medianOf(x);
+            boolean log = positive && med > 0 && sum / n > 1.5 * med;
+            double[] y = new double[n];
+            for (int i = 0; i < n; i++) y[i] = log ? Math.log(x[i]) : x[i];
+            double m = medianOf(y);
+            double[] dev = new double[n];
+            for (int i = 0; i < n; i++) dev[i] = Math.abs(y[i] - m);
+            double mad = medianOf(dev), scale;
+            if (mad > 0) scale = mad / 0.6745;
+            else {
+                double[] s = y.clone();
+                Arrays.sort(s);
+                double iqr = quantile(s, 0.75) - quantile(s, 0.25);
+                if (!(iqr > 0)) return null;
+                scale = iqr / 1.349;
+            }
+            double[] sc = new double[n];
+            for (int i = 0; i < n; i++) sc[i] = (y[i] - m) / scale;
+            return new Scored(sc, med, log);
+        }
+
+        record Flag(int row, Column col, double value, double typical, double score, boolean log) {}
+
+        static String rowLabel(DataTable t, int row) {
+            StringBuilder sb = new StringBuilder();
+            int used = 0;
+            for (Column c : t.cols) {
+                if (c.type != ColType.TEXT || used >= 2 || c.distinctCount() > 30) continue;   // categories, not IDs
+                String s = c.text[row];
+                if (s == null || s.isBlank()) continue;
+                sb.append(used++ == 0 ? "" : " / ").append(s.trim());
+            }
+            String ctx = ChartPanel.shorten(sb.toString(), 28);
+            return "#" + (row + 1) + (ctx.isEmpty() ? "" : " " + ctx);
+        }
+
+        static void anomalies(DataTable t, Plan p, boolean[] keep, Result r) throws AnalysisException {
+            Column xc = p.x == null ? null : t.find(p.x);
+            if (xc != null && xc.type == ColType.DATE) {
+                periodAnomalies(t, p, keep, r, xc);
+                return;
+            }
+            List<Column> cols = new ArrayList<>();
+            if (p.metric != null) {
+                Column m = need(t, p.metric, "column to scan");
+                if (m.type != ColType.NUMBER)
+                    throw new AnalysisException("Column \"" + m.name + "\" isn't numeric, so I can't look for unusual values in it. Numeric columns: "
+                            + t.colsOfType(ColType.NUMBER).stream().map(c -> c.name).toList() + ".");
+                cols.add(m);
+            } else cols.addAll(t.colsOfType(ColType.NUMBER));
+            if (cols.isEmpty()) throw new AnalysisException("This table has no numeric columns to scan for unusual values.");
+            Column gc = optional(t, p.series, "group");
+            if (gc != null && gc.type != ColType.TEXT) gc = null;
+
+            // rows grouped for comparison ("unusual for its own category")
+            Map<String, List<Integer>> groups = new LinkedHashMap<>();
+            for (int i = 0; i < t.rows; i++) {
+                if (!keep[i]) continue;
+                String g = gc == null ? "" : (gc.text[i] == null || gc.text[i].isBlank() ? null : gc.text[i].trim());
+                if (g != null) groups.computeIfAbsent(g, k -> new ArrayList<>()).add(i);
+            }
+
+            List<Flag> flags = new ArrayList<>();
+            Map<String, int[]> perCol = new LinkedHashMap<>();   // column -> {tested, flagged}
+            List<String> flat = new ArrayList<>(), tooSmall = new ArrayList<>();
+            Set<String> logCols = new LinkedHashSet<>();
+            for (Column c : cols) {
+                int[] tally = new int[2];
+                perCol.put(c.name, tally);
+                boolean anyTested = false;
+                for (List<Integer> g : groups.values()) {
+                    List<Integer> idx = new ArrayList<>();
+                    for (int i : g) if (!Double.isNaN(c.num[i])) idx.add(i);
+                    if (idx.size() < MIN_GROUP) continue;
+                    double[] x = new double[idx.size()];
+                    for (int k = 0; k < x.length; k++) x[k] = c.num[idx.get(k)];
+                    Scored s = robustScores(x);
+                    if (s == null) continue;
+                    anyTested = true;
+                    tally[0] += x.length;
+                    if (s.logScale()) logCols.add(c.name);
+                    for (int k = 0; k < x.length; k++)
+                        if (Math.abs(s.score()[k]) > ANOMALY_Z) {
+                            flags.add(new Flag(idx.get(k), c, x[k], s.typical(), s.score()[k], s.logScale()));
+                            tally[1]++;
+                        }
+                }
+                if (!anyTested) {
+                    int valid = 0;
+                    for (List<Integer> g : groups.values()) for (int i : g) if (!Double.isNaN(c.num[i])) valid++;
+                    (valid < MIN_GROUP ? tooSmall : flat).add(c.name);
+                }
+            }
+            int tested = 0;
+            for (int[] tl : perCol.values()) tested = Math.max(tested, tl[0]);
+            boolean anyTested = false;
+            for (int[] tl : perCol.values()) if (tl[0] > 0) anyTested = true;
+            if (!anyTested)
+                throw new AnalysisException("There isn't enough varied data to test"
+                        + (cols.size() == 1 ? " " + cols.get(0).name : "") + " for unusual values (I need at least " + MIN_GROUP + " values"
+                        + (gc != null ? " in a group" : "") + " that aren't all the same).");
+
+            flags.sort((a, b) -> Double.compare(Math.abs(b.score()), Math.abs(a.score())));
+            int total = flags.size(), lim = Math.max(1, Math.min(p.limit != null ? p.limit : 15, 200));
+            int high = 0;
+            for (Flag f : flags) if (f.score() > 0) high++;
+            int low = total - high;
+
+            // ---- table
+            r.rawCells = true;
+            r.headers.addAll(List.of("Data row", "Column", "Value", "Typical", "Score"));
+            for (Column c : t.cols) r.headers.add(c.name);
+            for (Flag f : flags.subList(0, Math.min(lim, total))) {
+                List<String> row = new ArrayList<>(List.of(String.valueOf(f.row() + 1), f.col().name, f.col().text[f.row()],
+                        Fmt.full(f.typical()), String.format(Locale.US, "%+.1f", f.score())));
+                for (Column c : t.cols) row.add(c.text[f.row()]);
+                r.rows.add(row.toArray(new String[0]));
+            }
+            String what = cols.size() == 1 ? cols.get(0).name + " values" : "values";
+            r.title = p.title != null ? p.title : "Unusual " + what + (gc != null ? " (compared within each " + gc.name + ")" : "");
+
+            // ---- chart
+            if (total > 0) {
+                ChartData cd = new ChartData();
+                cd.title = r.title;
+                if (cols.size() == 1) {
+                    List<Flag> top = flags.subList(0, Math.min(12, total));
+                    cd.type = ChartType.HBAR;
+                    cd.yLabel = cols.get(0).name;
+                    cd.series = new ArrayList<>(List.of(cols.get(0).name));
+                    double[] v = new double[top.size()];
+                    for (int i = 0; i < v.length; i++) {
+                        cd.labels.add(rowLabel(t, top.get(i).row()));
+                        v[i] = top.get(i).value();
+                        if (v[i] < 0) cd.signColors = true;
+                    }
+                    cd.values.add(v);
+                } else {
+                    List<String> names = new ArrayList<>();
+                    for (var e : perCol.entrySet()) if (e.getValue()[1] > 0) names.add(e.getKey());
+                    names.sort((a, b) -> perCol.get(b)[1] - perCol.get(a)[1]);
+                    cd.type = names.size() > 8 ? ChartType.HBAR : ChartType.BAR;
+                    cd.yLabel = "Unusual values";
+                    cd.series = new ArrayList<>(List.of("Unusual values"));
+                    double[] v = new double[names.size()];
+                    for (int i = 0; i < v.length; i++) v[i] = perCol.get(names.get(i))[1];
+                    cd.labels = names;
+                    cd.values.add(v);
+                }
+                r.charts.add(cd);
+            }
+
+            // ---- plain-English facts
+            String filt = matchedNote(r, p);
+            if (cols.size() == 1) {
+                Column c = cols.get(0);
+                if (total == 0)
+                    r.facts.add("No unusual " + c.name + " values found among " + Fmt.full(tested) + " tested" + filt + ": everything sits within the normal range.");
+                else
+                    r.facts.add("Of " + Fmt.full(tested) + " " + c.name + " values" + filt + ", " + Fmt.full(total) + " (" + String.format(Locale.US, "%.1f%%", 100.0 * total / tested)
+                            + ") look unusual: " + high + " unusually high and " + low + " unusually low.");
+            } else {
+                if (total == 0)
+                    r.facts.add("Scanned " + perCol.size() + " numeric columns" + filt + " and found no unusual values.");
+                else {
+                    List<String> parts = new ArrayList<>();
+                    perCol.entrySet().stream().filter(e -> e.getValue()[1] > 0)
+                            .sorted((a, b) -> b.getValue()[1] - a.getValue()[1]).limit(5)
+                            .forEach(e -> parts.add(e.getKey() + " (" + e.getValue()[1] + ")"));
+                    r.facts.add("Scanned " + perCol.size() + " numeric columns" + filt + ": " + Fmt.full(total) + " unusual values in total, most in " + String.join(", ", parts) + ".");
+                }
+            }
+            if (total > 0) {
+                Flag top = flags.get(0);
+                String how = top.log() && top.typical() > 0 && top.value() > 0
+                        ? String.format(Locale.US, "%.1f", top.value() / top.typical()) + "x the typical " + Fmt.full(top.typical())
+                        : "against a typical " + Fmt.full(top.typical());
+                r.facts.add("The most extreme is data row " + (top.row() + 1) + ": " + top.col().name + " of " + top.col().text[top.row()] + " (" + how + ").");
+                if (total > r.rows.size()) r.facts.add("Showing the " + r.rows.size() + " most extreme of " + total + ".");
+            }
+            if (!flat.isEmpty())
+                r.facts.add("Not tested: " + String.join(", ", flat) + " (most values are identical, so \"unusual\" has no meaning there).");
+            if (!tooSmall.isEmpty())
+                r.facts.add("Not tested: " + String.join(", ", tooSmall) + " (fewer than " + MIN_GROUP + " values" + (gc != null ? " in each group" : "") + ").");
+            if (total > 0 || !logCols.isEmpty())
+                r.facts.add("Method: a value is flagged when its robust z-score (median and median absolute deviation) is beyond +/-" + ANOMALY_Z
+                        + (logCols.isEmpty() ? "" : "; " + String.join(", ", logCols) + " is right-skewed, so it was judged on a log scale")
+                        + ". Unusual does not mean wrong - check each one.");
+            Column time = t.firstOfType(ColType.DATE);
+            if (total > 0 && time != null)
+                r.facts.add("Ask \"which weeks look unusual?\" to check for odd periods instead of odd rows.");
+        }
+
+        static final String[] BUCKET_ORDER = {"year", "quarter", "month", "week", "day"};
+
+        static LocalDate periodStart(LocalDate d, String b) {
+            switch (b) {
+                case "week": return d.with(java.time.DayOfWeek.MONDAY);
+                case "month": return d.withDayOfMonth(1);
+                case "quarter": return d.withDayOfMonth(1).withMonth((d.get(IsoFields.QUARTER_OF_YEAR) - 1) * 3 + 1);
+                case "year": return d.withDayOfYear(1);
+                default: return d;
+            }
+        }
+
+        static LocalDate periodEnd(LocalDate d, String b) {
+            switch (b) {
+                case "week": return d.with(java.time.DayOfWeek.SUNDAY);
+                case "month": return d.withDayOfMonth(d.lengthOfMonth());
+                case "quarter": return periodStart(d, b).plusMonths(3).minusDays(1);
+                case "year": return d.withDayOfYear(d.lengthOfYear());
+                default: return d;
+            }
+        }
+
+        static void periodAnomalies(DataTable t, Plan p, boolean[] keep, Result r, Column xc) throws AnalysisException {
+            Column m = metricOf(t, p);
+            String agg = aggOf(p, m);
+            String measure = measureLabel(agg, m);
+            String bucket = bucketOf(p.bucket, xc, keep);
+            if (bucket.equals("weekday")) bucket = "day";
+            LocalDate mn = null, mx = null;
+            for (int i = 0; i < t.rows; i++) {
+                if (!keep[i] || xc.date[i] == null) continue;
+                if (mn == null || xc.date[i].isBefore(mn)) mn = xc.date[i];
+                if (mx == null || xc.date[i].isAfter(mx)) mx = xc.date[i];
+            }
+            if (mn == null) throw new AnalysisException("None of the matching rows has a usable " + xc.name + " date.");
+
+            String asked = bucket;
+            TreeMap<String, Acc> byP = groupByPeriod(t, keep, xc, m, agg, bucket);
+            while (byP.size() < MIN_PERIODS && !bucket.equals("day")) {
+                for (int i = 0; i < BUCKET_ORDER.length - 1; i++)
+                    if (BUCKET_ORDER[i].equals(bucket)) {
+                        bucket = BUCKET_ORDER[i + 1];
+                        break;
+                    }
+                byP = groupByPeriod(t, keep, xc, m, agg, bucket);
+            }
+            if (byP.size() < MIN_PERIODS)
+                throw new AnalysisException("There are only " + byP.size() + " distinct dates in the matching rows - I need at least " + MIN_PERIODS + " periods to judge which are unusual.");
+
+            List<String> labels = new ArrayList<>(byP.keySet());
+            List<String> notes = new ArrayList<>();
+            // a partly-covered first or last period would look like a fake dip
+            if (additive(agg) && !bucket.equals("day") && labels.size() > MIN_PERIODS + 1) {
+                boolean dropFirst = periodStart(mn, bucket).isBefore(mn), dropLast = periodEnd(mx, bucket).isAfter(mx);
+                if (dropLast) {
+                    notes.add(labels.get(labels.size() - 1));
+                    labels.remove(labels.size() - 1);
+                }
+                if (dropFirst) {
+                    notes.add(labels.get(0));
+                    labels.remove(0);
+                }
+            }
+            int n = labels.size();
+            double[] v = new double[n];
+            for (int i = 0; i < n; i++) v[i] = nz0(byP.get(labels.get(i)).get(agg));
+
+            // what "normal" means for each period: the median of nearby periods (same weekday for daily data)
+            double[] base = new double[n], res = new double[n];
+            Map<LocalDate, Integer> dayIdx = new HashMap<>();
+            if (bucket.equals("day")) for (int i = 0; i < n; i++) dayIdx.put(LocalDate.parse(labels.get(i)), i);
+            for (int i = 0; i < n; i++) {
+                List<Double> nb = new ArrayList<>();
+                if (bucket.equals("day")) {
+                    LocalDate d = LocalDate.parse(labels.get(i));
+                    for (int k = -4; k <= 4; k++) {
+                        Integer j = k == 0 ? null : dayIdx.get(d.plusDays(7L * k));
+                        if (j != null) nb.add(v[j]);
+                    }
+                }
+                if (nb.size() < 3) {
+                    nb.clear();
+                    for (int j = Math.max(0, i - 3); j <= Math.min(n - 1, i + 3); j++) if (j != i) nb.add(v[j]);
+                }
+                base[i] = medianOf(nb.stream().mapToDouble(Double::doubleValue).toArray());
+                res[i] = v[i] - base[i];
+            }
+            double medRes = medianOf(res);
+            double[] dev = new double[n];
+            for (int i = 0; i < n; i++) dev[i] = Math.abs(res[i] - medRes);
+            double mad = medianOf(dev), scale;
+            if (mad > 0) scale = mad / 0.6745;
+            else {
+                double[] s = res.clone();
+                Arrays.sort(s);
+                double iqr = quantile(s, 0.75) - quantile(s, 0.25);
+                if (!(iqr > 0)) throw new AnalysisException(measure + " barely changes from one " + bucket + " to the next, so no period stands out.");
+                scale = iqr / 1.349;
+            }
+            double[] score = new double[n];
+            List<Integer> flagged = new ArrayList<>();
+            for (int i = 0; i < n; i++) {
+                score[i] = (res[i] - medRes) / scale;
+                if (Math.abs(score[i]) > ANOMALY_Z) flagged.add(i);
+            }
+            flagged.sort((a, b) -> Double.compare(Math.abs(score[b]), Math.abs(score[a])));
+            int total = flagged.size(), lim = Math.max(1, Math.min(p.limit != null ? p.limit : 15, 200));
+
+            r.headers.addAll(List.of(xc.name + " (" + bucket + ")", measure, "Typical (nearby periods)", "Difference", "Score"));
+            for (int i : flagged.subList(0, Math.min(lim, total)))
+                r.rows.add(new String[]{labels.get(i), Fmt.full(v[i]), Fmt.full(base[i]), base[i] != 0 ? Fmt.pct((v[i] - base[i]) / Math.abs(base[i])) : Fmt.signed(v[i] - base[i]),
+                        String.format(Locale.US, "%+.1f", score[i])});
+            r.title = p.title != null ? p.title : "Unusual " + bucket + "s: " + measure;
+
+            ChartData cd = new ChartData();
+            cd.type = ChartType.LINE;
+            cd.title = r.title;
+            cd.xLabel = xc.name + " (" + bucket + ")";
+            cd.yLabel = measure;
+            cd.labels = labels;
+            cd.series = new ArrayList<>(List.of(measure, "Typical (nearby periods)"));
+            cd.values.add(v);
+            cd.values.add(base);
+            cd.highlight.addAll(flagged);
+            r.charts.add(cd);
+
+            String filt = matchedNote(r, p);
+            if (!bucket.equals(asked))
+                r.facts.add("The data only spans a few " + asked + "s, so I looked at " + bucket + "s instead.");
+            if (total == 0)
+                r.facts.add("No " + bucket + " stands out: " + measure + " stays within its normal range across " + n + " " + bucket + "s" + filt + ".");
+            else {
+                r.facts.add("Looked at " + measure + " per " + bucket + " across " + n + " periods" + filt + ": " + total + (total == 1 ? " looks" : " look") + " unusual.");
+                int top = flagged.get(0);
+                r.facts.add("The most unusual is " + labels.get(top) + " at " + Fmt.full(v[top]) + " against a typical " + Fmt.full(base[top])
+                        + (base[top] != 0 ? " (" + Fmt.pct((v[top] - base[top]) / Math.abs(base[top])) + ")" : "") + ".");
+                if (total > 1) {
+                    List<String> others = new ArrayList<>();
+                    for (int k = 1; k < Math.min(total, 4); k++) others.add(labels.get(flagged.get(k)) + " (" + (score[flagged.get(k)] > 0 ? "high" : "low") + ")");
+                    r.facts.add("Next: " + String.join(", ", others) + (total > 4 ? ", and " + (total - 4) + " more" : "") + ".");
+                }
+                if (bucket.equals("month") || bucket.equals("quarter"))
+                    r.facts.add("Ask \"what's driving the " + (score[top] < 0 ? "drop" : "rise") + " in " + labels.get(top) + "?\" to see why.");
+            }
+            if (!notes.isEmpty())
+                r.facts.add("Left out the partly-covered " + String.join(" and ", notes) + " so an incomplete period isn't mistaken for a dip.");
+            r.facts.add("Method: each " + bucket + " is compared with nearby ones" + (bucket.equals("day") ? " (same weekday where possible)" : "")
+                    + " and flagged when its robust z-score is beyond +/-" + ANOMALY_Z + ".");
+        }
+
+        static TreeMap<String, Acc> groupByPeriod(DataTable t, boolean[] keep, Column xc, Column m, String agg, String bucket) {
+            TreeMap<String, Acc> by = new TreeMap<>();
+            for (int i = 0; i < t.rows; i++) {
+                if (!keep[i] || xc.date[i] == null) continue;
+                double v = 1;
+                if (m != null) {
+                    v = m.num[i];
+                    if (Double.isNaN(v)) continue;
+                }
+                by.computeIfAbsent(bucketLabel(xc.date[i], bucket), k -> new Acc()).add(v, agg.equals("median"));
+            }
+            return by;
         }
 
         // ------------------------------------------------------------ describe
@@ -1545,6 +2692,21 @@ public class DataChat extends JFrame {
                 cd.labels = xs;
                 cd.series = ss;
                 for (double[] row : vals) cd.values.add(row);
+                if (!weekday) {   // drill-down context
+                    cd.basePlan = p;
+                    if (timeX) {
+                        cd.periodX = true;
+                        cd.timeCol = xc.name;
+                        cd.bucket = xb;
+                    } else {
+                        cd.labelFilters = new ArrayList<>();
+                        for (String lab : xs) cd.labelFilters.add(List.of(new Filter(xc.name, "=", List.of(lab))));
+                    }
+                    if (sc != null && sc.type == ColType.TEXT) {
+                        cd.seriesFilters = new ArrayList<>();
+                        for (String sname : ss) cd.seriesFilters.add(List.of(new Filter(sc.name, "=", List.of(sname))));
+                    }
+                }
                 if (!r.rows.isEmpty()) r.charts.add(cd);
             }
 
@@ -1636,6 +2798,234 @@ public class DataChat extends JFrame {
                     r.facts.add(measure + " for " + xs.get(0) + " is " + Fmt.full(v[0]) + filt + ".");
                 }
             }
+        }
+
+        // ------------------------------------------------------------ correlate
+        static final class PairStats {
+            double[] xs, ys;
+            int n;
+            double r, rho, slope, intercept, r2, mx, my;
+        }
+
+        static PairStats pair(Column a, Column b, boolean[] keep) {
+            int cnt = 0;
+            for (int i = 0; i < keep.length; i++) if (keep[i] && !Double.isNaN(a.num[i]) && !Double.isNaN(b.num[i])) cnt++;
+            if (cnt < 3) return null;
+            double[] xs = new double[cnt], ys = new double[cnt];
+            int k = 0;
+            for (int i = 0; i < keep.length; i++)
+                if (keep[i] && !Double.isNaN(a.num[i]) && !Double.isNaN(b.num[i])) {
+                    xs[k] = a.num[i];
+                    ys[k] = b.num[i];
+                    k++;
+                }
+            double mx = 0, my = 0;
+            for (int i = 0; i < cnt; i++) {
+                mx += xs[i];
+                my += ys[i];
+            }
+            mx /= cnt;
+            my /= cnt;
+            double sxx = 0, syy = 0, sxy = 0;
+            for (int i = 0; i < cnt; i++) {
+                sxx += (xs[i] - mx) * (xs[i] - mx);
+                syy += (ys[i] - my) * (ys[i] - my);
+                sxy += (xs[i] - mx) * (ys[i] - my);
+            }
+            if (sxx == 0 || syy == 0) return null;
+            PairStats ps = new PairStats();
+            ps.xs = xs;
+            ps.ys = ys;
+            ps.n = cnt;
+            ps.mx = mx;
+            ps.my = my;
+            ps.r = sxy / Math.sqrt(sxx * syy);
+            ps.slope = sxy / sxx;
+            ps.intercept = my - ps.slope * mx;
+            ps.r2 = ps.r * ps.r;
+            return ps;
+        }
+
+        static double[] ranks(double[] v) {
+            Integer[] idx = new Integer[v.length];
+            for (int i = 0; i < idx.length; i++) idx[i] = i;
+            Arrays.sort(idx, Comparator.comparingDouble(i -> v[i]));
+            double[] rk = new double[v.length];
+            for (int i = 0; i < idx.length; ) {
+                int j = i;
+                while (j + 1 < idx.length && v[idx[j + 1]] == v[idx[i]]) j++;
+                double avg = (i + j) / 2.0 + 1;
+                for (int k = i; k <= j; k++) rk[idx[k]] = avg;
+                i = j + 1;
+            }
+            return rk;
+        }
+
+        static double pearson(double[] a, double[] b) {
+            int n = a.length;
+            double ma = 0, mb = 0;
+            for (int i = 0; i < n; i++) {
+                ma += a[i];
+                mb += b[i];
+            }
+            ma /= n;
+            mb /= n;
+            double sa = 0, sb = 0, sab = 0;
+            for (int i = 0; i < n; i++) {
+                sa += (a[i] - ma) * (a[i] - ma);
+                sb += (b[i] - mb) * (b[i] - mb);
+                sab += (a[i] - ma) * (b[i] - mb);
+            }
+            return sa == 0 || sb == 0 ? Double.NaN : sab / Math.sqrt(sa * sb);
+        }
+
+        static String strength(double ar) {
+            return ar < 0.1 ? "negligible" : ar < 0.3 ? "weak" : ar < 0.5 ? "moderate" : ar < 0.7 ? "strong" : "very strong";
+        }
+
+        static String sig(double v) {
+            double a = Math.abs(v);
+            return a >= 100 ? String.format(Locale.US, "%,.0f", v) : a >= 1 ? String.format(Locale.US, "%,.2f", v) : String.format(Locale.US, "%.4g", v);
+        }
+
+        static void correlate(DataTable t, Plan p, boolean[] keep, Result r) throws AnalysisException {
+            List<Column> nums = t.colsOfType(ColType.NUMBER);
+            if (nums.size() < 2)
+                throw new AnalysisException("Correlation needs at least two numeric columns, and this table has " + nums.size() + ".");
+            Column xc = optional(t, p.x, "x-axis"), yc = optional(t, p.metric, "y-axis");
+            for (Column c : new Column[]{xc, yc})
+                if (c != null && c.type != ColType.NUMBER)
+                    throw new AnalysisException("Column \"" + c.name + "\" isn't numeric, so I can't correlate it. Numeric columns: " + nums.stream().map(n -> n.name).toList() + ".");
+            if (xc != null && xc == yc) throw new AnalysisException("Pick two different columns to compare.");
+            Column sc = optional(t, p.series, "colour grouping");
+            if (sc != null && sc.type != ColType.TEXT) sc = null;
+
+            if (xc == null || yc == null) {
+                // correlation matrix; if one column was named, find its strongest partner
+                List<Column> cs = new ArrayList<>(nums.size() > 12 ? nums.subList(0, 12) : nums);
+                Column fixed = xc != null ? xc : yc;
+                if (fixed != null && !cs.contains(fixed)) cs.add(fixed);
+                int nc = cs.size();
+                double[][] rm = new double[nc][nc];
+                List<Object[]> pairs = new ArrayList<>();
+                for (int i = 0; i < nc; i++) {
+                    rm[i][i] = 1;
+                    for (int j = i + 1; j < nc; j++) {
+                        PairStats q = pair(cs.get(i), cs.get(j), keep);
+                        rm[i][j] = rm[j][i] = q == null ? Double.NaN : q.r;
+                        if (q != null) pairs.add(new Object[]{cs.get(i), cs.get(j), q.r, q.n});
+                    }
+                }
+                pairs.sort((a, b) -> Double.compare(Math.abs((double) b[2]), Math.abs((double) a[2])));
+                Object[] best = null;
+                for (Object[] pr : pairs)
+                    if (fixed == null || pr[0] == fixed || pr[1] == fixed) {
+                        best = pr;
+                        break;
+                    }
+                if (best == null) throw new AnalysisException("I couldn't find two numeric columns with enough overlapping values to correlate.");
+                Column a = (Column) best[0], b = (Column) best[1];
+                if (fixed != null && b == fixed) {
+                    Column tmp = a;
+                    a = b;
+                    b = tmp;
+                }
+                xc = a;
+                yc = b;
+                r.headers.add("");
+                for (Column c : cs) r.headers.add(c.name);
+                for (int i = 0; i < nc; i++) {
+                    String[] row = new String[nc + 1];
+                    row[0] = cs.get(i).name;
+                    for (int j = 0; j < nc; j++) row[j + 1] = Double.isNaN(rm[i][j]) ? "" : String.format(Locale.US, "%.2f", rm[i][j]);
+                    r.rows.add(row);
+                }
+                StringBuilder sb = new StringBuilder();
+                int shown = 0;
+                for (Object[] pr : pairs) {
+                    double rr = (double) pr[2];
+                    if (Math.abs(rr) < 0.3 || shown >= 3) break;
+                    sb.append(shown++ > 0 ? "; " : "").append(((Column) pr[0]).name).append(" and ").append(((Column) pr[1]).name)
+                            .append(" (r = ").append(String.format(Locale.US, "%.2f", rr)).append(", ").append(strength(Math.abs(rr))).append(rr > 0 ? " positive" : " negative").append(")");
+                }
+                r.facts.add(shown == 0
+                        ? "None of the numeric columns has a notable linear relationship with another (every |r| is below 0.3)."
+                        : "Strongest relationships between numeric columns: " + sb + ".");
+            }
+
+            PairStats ps = pair(xc, yc, keep);
+            if (ps == null)
+                throw new AnalysisException("There aren't enough rows with values in both \"" + xc.name + "\" and \"" + yc.name + "\" (or one of them never changes).");
+            ps.rho = pearson(ranks(ps.xs), ranks(ps.ys));
+            if (r.rows.isEmpty()) {   // pair mode: show the statistics
+                r.headers.addAll(List.of("Statistic", "Value"));
+                r.rows.add(new String[]{"Rows with both values", String.format(Locale.US, "%,d", ps.n)});
+                r.rows.add(new String[]{"Pearson r", String.format(Locale.US, "%.3f", ps.r)});
+                r.rows.add(new String[]{"Spearman rho (rank)", String.format(Locale.US, "%.3f", ps.rho)});
+                r.rows.add(new String[]{"R-squared", String.format(Locale.US, "%.1f%%", ps.r2 * 100)});
+                r.rows.add(new String[]{"Slope (" + yc.name + " per 1 " + xc.name + ")", sig(ps.slope)});
+                r.rows.add(new String[]{"Intercept", sig(ps.intercept)});
+                r.rows.add(new String[]{"Mean of " + xc.name, Fmt.full(ps.mx)});
+                r.rows.add(new String[]{"Mean of " + yc.name, Fmt.full(ps.my)});
+            }
+            r.title = p.title != null ? p.title : yc.name + " vs " + xc.name;
+
+            // facts
+            double ar = Math.abs(ps.r);
+            List<String> f = new ArrayList<>();
+            f.add(xc.name + " and " + yc.name + (ar < 0.1 ? " show no meaningful linear relationship" : " show a " + strength(ar) + (ps.r > 0 ? " positive" : " negative") + " correlation")
+                    + " (r = " + String.format(Locale.US, "%.2f", ps.r) + ", n = " + String.format(Locale.US, "%,d", ps.n) + ", R-squared " + String.format(Locale.US, "%.0f%%", ps.r2 * 100) + ").");
+            if (ar >= 0.1)
+                f.add("On average, each +1 in " + xc.name + " goes with " + (ps.slope > 0 ? "a rise" : "a fall") + " of " + sig(Math.abs(ps.slope)) + " in " + yc.name + " (straight-line fit).");
+            if (ar < 1.96 / Math.sqrt(ps.n))
+                f.add("That is within what random noise alone would produce at this sample size, so don't read much into it.");
+            if (Math.abs(ps.rho - ps.r) > 0.15)
+                f.add("The rank correlation (Spearman " + String.format(Locale.US, "%.2f", ps.rho) + ") differs from r, which suggests a curved relationship or influential outliers.");
+            f.add("Correlation does not prove that one causes the other.");
+            r.facts.addAll(f);
+
+            // scatter chart (sampled if there are very many points)
+            Map<String, Integer> gcount = new HashMap<>();
+            if (sc != null)
+                for (int i = 0; i < t.rows; i++)
+                    if (keep[i] && !Double.isNaN(xc.num[i]) && !Double.isNaN(yc.num[i]) && sc.text[i] != null && !sc.text[i].isBlank()) gcount.merge(sc.text[i].trim(), 1, Integer::sum);
+            List<String> groups = new ArrayList<>(gcount.keySet());
+            groups.sort((a, b) -> gcount.get(b) - gcount.get(a));
+            if (groups.size() > 6) groups = new ArrayList<>(groups.subList(0, 6));
+            if (sc == null || groups.isEmpty()) groups = List.of(yc.name + " vs " + xc.name);
+            boolean grouped = sc != null && gcount.size() > 0;
+            int stride = Math.max(1, (int) Math.ceil(ps.n / 4000.0));
+            List<List<double[]>> pts = new ArrayList<>();
+            for (int g = 0; g < groups.size(); g++) pts.add(new ArrayList<>());
+            int seen = 0;
+            for (int i = 0; i < t.rows; i++) {
+                if (!keep[i] || Double.isNaN(xc.num[i]) || Double.isNaN(yc.num[i])) continue;
+                if (seen++ % stride != 0) continue;
+                int g = 0;
+                if (grouped) {
+                    g = sc.text[i] == null ? -1 : groups.indexOf(sc.text[i].trim());
+                    if (g < 0) continue;
+                }
+                pts.get(g).add(new double[]{xc.num[i], yc.num[i]});
+            }
+            ChartData cd = new ChartData();
+            cd.type = ChartType.SCATTER;
+            cd.title = r.title;
+            cd.xLabel = xc.name;
+            cd.yLabel = yc.name;
+            for (int g = 0; g < groups.size(); g++) {
+                cd.series.add(groups.get(g));
+                double[] gx = new double[pts.get(g).size()], gy = new double[gx.length];
+                for (int k = 0; k < gx.length; k++) {
+                    gx[k] = pts.get(g).get(k)[0];
+                    gy[k] = pts.get(g).get(k)[1];
+                }
+                cd.sx.add(gx);
+                cd.sy.add(gy);
+            }
+            cd.fit = new double[]{ps.slope, ps.intercept, ps.r, ps.n};
+            r.charts.add(cd);
+            if (stride > 1) r.facts.add("The scatter plot shows a sample of about " + String.format(Locale.US, "%,d", ps.n / stride) + " of the " + String.format(Locale.US, "%,d", ps.n) + " points; the statistics use all of them.");
         }
 
         // ------------------------------------------------------------ drivers
@@ -1760,7 +3150,8 @@ public class DataChat extends JFrame {
             List<DriverRow> singles = new ArrayList<>(), combos = new ArrayList<>();
             for (int d = 0; d < dims.size(); d++)
                 for (var e : single.get(d).entrySet()) {
-                    DriverRow dr = driverRow(1, dims.get(d).name + " = " + e.getKey(), e.getValue(), agg, add, totalDelta, ratio);
+                    DriverRow dr = driverRow(1, dims.get(d).name + " = " + e.getKey(), e.getValue(), agg, add, totalDelta, ratio,
+                            List.of(new Filter(dims.get(d).name, "=", List.of(e.getKey()))));
                     if (dr != null) singles.add(dr);
                 }
             Map<String, DriverRow> singleMap = new HashMap<>();
@@ -1769,7 +3160,9 @@ public class DataChat extends JFrame {
                 String[] parts = e.getKey().split("\u0001");
                 String la = dims.get(Integer.parseInt(parts[0])).name + " = " + parts[1];
                 String lb = dims.get(Integer.parseInt(parts[2])).name + " = " + parts[3];
-                DriverRow dr = driverRow(2, la + " & " + lb, e.getValue(), agg, add, totalDelta, ratio);
+                DriverRow dr = driverRow(2, la + " & " + lb, e.getValue(), agg, add, totalDelta, ratio,
+                        List.of(new Filter(dims.get(Integer.parseInt(parts[0])).name, "=", List.of(parts[1])),
+                                new Filter(dims.get(Integer.parseInt(parts[2])).name, "=", List.of(parts[3]))));
                 if (dr == null || dr.from() == 0) continue;
                 // keep a combination only if it moved clearly more (in %) than BOTH of its parts: it adds information
                 DriverRow da = singleMap.get(la), db = singleMap.get(lb);
@@ -1815,6 +3208,10 @@ public class DataChat extends JFrame {
             trend.values.add(tv);
             trend.highlight.add(labels.indexOf(fromL));
             trend.highlight.add(labels.indexOf(toL));
+            trend.basePlan = p;
+            trend.periodX = true;
+            trend.timeCol = tc.name;
+            trend.bucket = bucket;
             r.charts.add(trend);
 
             // chart 2: contributions
@@ -1832,6 +3229,9 @@ public class DataChat extends JFrame {
             }
             bars.series = List.of("Change");
             bars.values.add(dv);
+            bars.basePlan = p;
+            bars.labelFilters = new ArrayList<>();
+            for (DriverRow d : plot) bars.labelFilters.add(d.filters());
             if (!plot.isEmpty()) r.charts.add(bars);
 
             // facts
@@ -1878,14 +3278,14 @@ public class DataChat extends JFrame {
          * in line with the overall trend. This stops huge, stable segments (e.g. Status = Completed) from
          * topping the list just because they are big.
          */
-        static DriverRow driverRow(int level, String label, Acc[] a, String agg, boolean add, double totalDelta, double ratio) {
+        static DriverRow driverRow(int level, String label, Acc[] a, String agg, boolean add, double totalDelta, double ratio, List<Filter> fl) {
             double f = a[0] == null ? (add ? 0 : Double.NaN) : a[0].get(agg);
             double t = a[1] == null ? (add ? 0 : Double.NaN) : a[1].get(agg);
             if (Double.isNaN(f) || Double.isNaN(t)) return null;
             double d = t - f;
             if (d == 0) return null;
             double excess = add && !Double.isNaN(ratio) && !Double.isInfinite(ratio) ? t - f * ratio : d;
-            return new DriverRow(level, label, f, t, d, excess, add && totalDelta != 0 ? d / totalDelta : Double.NaN);
+            return new DriverRow(level, label, f, t, d, excess, add && totalDelta != 0 ? d / totalDelta : Double.NaN, fl);
         }
     }
 
@@ -1925,7 +3325,238 @@ public class DataChat extends JFrame {
             return best;
         }
 
-        static Plan plan(String question, DataTable t) {
+        static final Pattern STRONG = Pattern.compile("^ (now|and|also|then|but|instead|same|only|just|what about|how about|what if|ok|okay|"
+                + "colou?r|split|group|segment|stack|break (it|that|this|them) down|drill|zoom|filter|exclude|excluding|without|remove|clear|reset|"
+                + "show (it|that|them|this)|make (it|that|this)|change (it|that|this)|switch|as a|compare (it|that|this)) ");
+        static final Pattern WEAK = Pattern.compile("^ (top|bottom|best|worst|per|by|for|in|with) ");
+
+        static Plan plan(String question, DataTable t) { return plan(question, t, null); }
+
+        /** With a previous plan, short follow-ups ("now split that by channel", "only North") modify it instead of starting over. */
+        static Plan plan(String question, DataTable t, Plan prev) {
+            Plan f = fresh(question, t);
+            if (prev == null || f.intent.equals("describe")) return f;
+            String qn = norm(question);
+            if (has(qn, " (start over|start again|new question|from scratch) ")) return f;
+            int words = qn.trim().split(" ").length;
+            boolean follow = (STRONG.matcher(qn).find() && words <= 14)
+                    || (WEAK.matcher(qn).find() && words <= 3)
+                    || (has(qn, " (that|it|those|them|these|same|previous|earlier|above) ") && words <= 12)
+                    || (has(qn, " (only|just) ") && words <= 6)
+                    || (has(qn, " (instead|rather|again) ") && words <= 8);
+            if (!follow) return f;
+            Plan m = followUp(qn, t, prev, f);
+            return m != null ? m : f;
+        }
+
+        /** Filters in {@code add} replace filters on the same column in {@code base} (unless keepSameColumn). */
+        static List<Filter> mergeFilters(List<Filter> base, List<Filter> add, boolean keepSameColumn) {
+            Set<String> cols = new HashSet<>();
+            for (Filter f : add) cols.add(f.column().toLowerCase(Locale.ROOT));
+            List<Filter> out = new ArrayList<>();
+            for (Filter f : base) if (keepSameColumn || !cols.contains(f.column().toLowerCase(Locale.ROOT))) out.add(f);
+            out.addAll(add);
+            return out;
+        }
+
+        /** Applies only what the follow-up explicitly says to a copy of the previous plan. Returns null if nothing was recognised. */
+        static Plan followUp(String qn, DataTable t, Plan prev, Plan fresh) {
+            List<Column> nums = t.colsOfType(ColType.NUMBER);
+            boolean metricNamed = false;
+            for (Column c : nums) if (mention(qn, c.name) >= 0) metricNamed = true;
+            boolean aggWord = has(qn, " (average|avg|mean|typical|median|maximum|max|peak|minimum|min|how many|count|number of|total|sum) ");
+            boolean groupNamed = fresh.x != null && (fresh.message == null || !fresh.message.contains("didn't say how to group"));
+            boolean splitCue = has(qn, " (split|break|broken|breakdown|segment|segmented|colou?r|coloured|group|grouped|stack|stacked|further|also|and|then) ")
+                    && has(qn, " (by|per|into|across) ");
+            boolean chartWord = List.of("pie", "line", "bar").contains(fresh.chart);
+            boolean dateFilter = fresh.filters.stream().anyMatch(f -> {
+                Column c = t.find(f.column());
+                return c != null && c.type == ColType.DATE;
+            });
+
+            Plan p = prev.copy();
+            p.title = null;
+            p.message = null;
+            List<String> notes = new ArrayList<>();
+            boolean filtersChanged = false;
+
+            if ((has(qn, " (clear|remove|reset|drop|forget) (the |all |any |those |that |my )?(filters?|restrictions?) ")
+                    || has(qn, " (all|every) (data|rows|records) ")) && !p.filters.isEmpty()) {
+                p.filters = new ArrayList<>();
+                notes.add("cleared the earlier filters");
+                filtersChanged = true;
+            }
+            if (!fresh.filters.isEmpty()) {
+                p.filters = mergeFilters(p.filters, fresh.filters, false);
+                notes.add("filtered to " + Engine.describeFilters(fresh));
+                filtersChanged = true;
+            }
+
+            if (fresh.intent.equals("drivers")) {
+                p.intent = "drivers";
+                p.x = fresh.x;
+                p.bucket = fresh.bucket;
+                p.from = fresh.from;
+                p.to = fresh.to;
+                p.direction = fresh.direction;
+                p.series = null;
+                p.chart = "auto";
+                p.sort = "none";
+                p.limit = null;
+                if (metricNamed) p.metric = fresh.metric;
+                if (aggWord) p.agg = fresh.agg;
+                p.filters.removeIf(f -> {
+                    Column c = t.find(f.column());
+                    return c != null && c.type == ColType.DATE;
+                });
+                notes.add("analysing what changed");
+            } else if (fresh.intent.equals("anomalies")) {
+                p.intent = "anomalies";
+                p.x = fresh.x;
+                p.bucket = fresh.bucket;
+                p.metric = fresh.metric;
+                p.series = fresh.series;
+                p.agg = fresh.agg;
+                p.chart = fresh.chart;
+                p.sort = "none";
+                p.from = null;
+                p.to = null;
+                p.limit = fresh.limit;
+                notes.add("looking for unusual values");
+            } else if (fresh.intent.equals("correlate")) {
+                p.intent = "correlate";
+                p.x = fresh.x;
+                p.metric = fresh.metric;
+                p.series = fresh.series;
+                p.chart = "scatter";
+                p.bucket = null;
+                p.from = null;
+                p.to = null;
+                p.sort = "none";
+                p.limit = null;
+                notes.add("looking at the relationship between numeric columns");
+            } else if (fresh.intent.equals("rows")) {
+                p.intent = "rows";
+                p.x = null;
+                p.series = null;
+                p.bucket = null;
+                p.chart = "none";
+                p.from = null;
+                p.to = null;
+                if (metricNamed && fresh.metric != null) p.metric = fresh.metric;
+                else if (p.metric == null) p.metric = fresh.metric;
+                p.sort = fresh.sort.equals("none") ? "desc" : fresh.sort;
+                p.limit = fresh.limit;
+                notes.add("listing individual rows");
+            } else if (prev.intent.equals("correlate")) {
+                if (groupNamed) {
+                    Column gc = t.find(fresh.x);
+                    if (gc != null && gc.type == ColType.TEXT) {
+                        p.series = gc.name;
+                        notes.add("colouring points by " + gc.name);
+                    }
+                }
+            } else if (prev.intent.equals("anomalies") && !aggWord && !chartWord) {
+                if (metricNamed && fresh.metric != null) {
+                    p.metric = fresh.metric;
+                    notes.add("scanning " + fresh.metric);
+                }
+                if (fresh.limit != null) {
+                    p.limit = fresh.limit;
+                    notes.add("showing " + fresh.limit);
+                }
+                if (groupNamed) {
+                    Column gc = t.find(fresh.x);
+                    if (gc != null && gc.type == ColType.TEXT) {
+                        p.series = gc.name;
+                        notes.add("comparing within each " + gc.name);
+                    }
+                }
+            } else if (prev.intent.equals("rows") && !groupNamed && !aggWord) {
+                if (metricNamed && fresh.metric != null) {
+                    p.metric = fresh.metric;
+                    notes.add("sorting by " + fresh.metric);
+                }
+                if (fresh.limit != null) {
+                    p.limit = fresh.limit;
+                    notes.add("showing " + fresh.limit + " rows");
+                }
+                if (!"none".equals(fresh.sort)) {
+                    p.sort = fresh.sort;
+                    notes.add(fresh.sort.equals("asc") ? "lowest first" : "highest first");
+                }
+            } else if (prev.intent.equals("drivers") && !groupNamed && !metricNamed && !aggWord && !chartWord && !dateFilter) {
+                // only the filters changed: keep the driver analysis
+            } else {
+                if (!p.intent.equals("aggregate")) {   // coming from a drivers / rows answer
+                    if (!prev.intent.equals("drivers")) {
+                        p.x = null;
+                        p.series = null;
+                        p.bucket = null;
+                    }
+                    p.intent = "aggregate";
+                    p.from = null;
+                    p.to = null;
+                    p.sort = "none";
+                    p.chart = "auto";
+                    p.limit = null;
+                }
+                if (metricNamed) {
+                    p.metric = fresh.metric;
+                    if (!aggWord && "count".equals(p.agg)) p.agg = "sum";
+                    notes.add("measuring " + fresh.metric);
+                }
+                if (aggWord) {
+                    p.agg = fresh.agg;
+                    if (fresh.metric == null && fresh.agg.equals("count") && !metricNamed) p.metric = null;
+                    notes.add("using " + p.agg);
+                }
+                if (p.metric == null) p.agg = "count";
+                if (groupNamed) {
+                    if (splitCue && p.x != null && !p.x.equalsIgnoreCase(fresh.x)) {
+                        p.series = fresh.x;
+                        if (fresh.bucket != null) p.bucket = fresh.bucket;
+                        notes.add("split by " + fresh.x);
+                    } else if (p.x == null || !p.x.equalsIgnoreCase(fresh.x) || fresh.series != null) {
+                        p.x = fresh.x;
+                        p.series = fresh.series;
+                        p.bucket = fresh.bucket;
+                        p.chart = "auto";
+                        if (fresh.limit == null) {
+                            p.limit = null;
+                            p.sort = "none";
+                        }
+                        notes.add("grouping by " + fresh.x + (fresh.series != null ? " and " + fresh.series : ""));
+                    } else if (fresh.bucket != null && !fresh.bucket.equals(p.bucket)) {
+                        p.bucket = fresh.bucket;
+                        notes.add("by " + fresh.bucket);
+                    }
+                }
+                if (fresh.limit != null) {
+                    p.limit = fresh.limit;
+                    p.sort = fresh.sort;
+                    notes.add("top " + fresh.limit);
+                } else if (!"none".equals(fresh.sort)) {
+                    p.sort = fresh.sort;
+                    notes.add(fresh.sort.equals("asc") ? "lowest first" : "highest first");
+                }
+                if (chartWord) {
+                    p.chart = fresh.chart;
+                    notes.add("as a " + fresh.chart + " chart");
+                }
+            }
+            if (notes.isEmpty()) return null;
+
+            Column xc = p.x == null ? null : t.find(p.x), sc = p.series == null ? null : t.find(p.series);
+            if (!p.intent.equals("drivers") && (xc == null || xc.type != ColType.DATE) && (sc == null || sc.type != ColType.DATE)) p.bucket = null;
+            StringBuilder msg = new StringBuilder("Follow-up to your previous question: " + String.join("; ", notes) + ".");
+            if (!filtersChanged && !p.filters.isEmpty())
+                msg.append(" Earlier filters still apply (").append(Engine.describeFilters(p)).append("); say \"clear filters\" to remove them.");
+            p.message = msg.toString();
+            return p;
+        }
+
+        static Plan fresh(String question, DataTable t) {
             String qn = norm(question);
             Plan p = new Plan();
             Column time = t.firstOfType(ColType.DATE);
@@ -1970,7 +3601,8 @@ public class DataChat extends JFrame {
 
             // ---- intent
             boolean periodPair = months.size() + quarters.size() >= 2;
-            boolean change = time != null && has(qn, " (drop|dropped|drops|decline|declined|declining|fall|fell|fallen|falling|decrease|decreased|dip|dipped|slump|slumped|"
+            boolean anomWord = has(qn, " (anomal\\w*|outliers?|unusual\\w*|abnormal\\w*|irregular\\w*|suspicious\\w*|odd|strange|weird|unexpected\\w*|atypical|aberrant|fishy|out of the ordinary|out of line|stand out|stands out|standing out|extreme) ");
+            boolean change = time != null && !anomWord && has(qn, " (drop|dropped|drops|decline|declined|declining|fall|fell|fallen|falling|decrease|decreased|dip|dipped|slump|slumped|"
                     + "increase|increased|spike|spiked|jump|jumped|surge|surged|rise|rose|grew|why|driving|driver|drivers|drove|cause|caused|reason|reasons|behind|explain|what changed|went down|went up"
                     + (periodPair ? "|compare|compared|versus|vs|difference|differ" : "") + ") ");
             boolean rise = has(qn, " (increase|increased|spike|spiked|jump|jumped|surge|surged|rise|rose|grew|went up) ") && !has(qn, " (drop|dropped|decline|declined|fall|fell|dip|dipped|slump|decrease|decreased|went down) ");
@@ -2038,7 +3670,7 @@ public class DataChat extends JFrame {
             }
 
             // ---- chart type
-            if (has(qn, " (pie|donut|doughnut|share|shares|proportion|proportions|percentage|percentages|composition|split) ")) p.chart = "pie";
+            if (has(qn, " (pie|donut|doughnut|share|shares|proportion|proportions|percentage|percentages|composition) ")) p.chart = "pie";
             else if (has(qn, " (line|lines|trend|trends|over time) ")) p.chart = "line";
             else if (has(qn, " (bar|bars|column|columns|histogram) ")) p.chart = "bar";
 
@@ -2083,6 +3715,75 @@ public class DataChat extends JFrame {
                 }
                 p.filters.add(new Filter(time.name, ">=", List.of(lo)));
                 p.filters.add(new Filter(time.name, "<=", List.of(hi)));
+            }
+
+            // ---- anomalies / outliers
+            if (anomWord && !nums.isEmpty()) {
+                String ab = bucket;
+                if (ab == null) {
+                    if (has(qn, " (days|dates|which day|what day|any day) ")) ab = "day";
+                    else if (has(qn, " (weeks|which week|what week|any week) ")) ab = "week";
+                    else if (has(qn, " (months|which month|what month|any month) ")) ab = "month";
+                    else if (has(qn, " (quarters|which quarter|what quarter|any quarter) ")) ab = "quarter";
+                    else if (has(qn, " (years|which year|what year|any year) ")) ab = "year";
+                }
+                boolean periodAsk = time != null && (ab != null || timeWord || has(qn, " periods "));
+                p.intent = "anomalies";
+                p.sort = "none";
+                p.series = null;
+                if (periodAsk) {
+                    p.x = time.name;
+                    p.bucket = ab;
+                    p.chart = "line";
+                } else {
+                    p.x = null;
+                    p.bucket = null;
+                    p.chart = "auto";
+                    p.agg = "sum";
+                    p.metric = mentioned && metric != null ? metric.name : null;
+                    p.message = null;
+                    for (Column c : cats) if (mention(qn, c.name) >= 0 && !filteredCols.contains(c.name)) { p.series = c.name; break; }
+                }
+                return p;
+            }
+
+            // ---- correlation / scatter plots
+            List<Column> numHits = new ArrayList<>();
+            {
+                List<int[]> ph = new ArrayList<>();
+                for (int i = 0; i < nums.size(); i++) {
+                    int pos = mention(qn, nums.get(i).name);
+                    if (pos >= 0) ph.add(new int[]{pos, i});
+                }
+                ph.sort(Comparator.comparingInt(h -> h[0]));
+                for (int[] h : ph) numHits.add(nums.get(h[1]));
+            }
+            boolean corrWord = has(qn, " (correlat\\w*|relationship|relationships|related|relate|relates|scatter\\w*|association|associated|linked|depends? on|dependence|influence\\w*|covary|co vary) ");
+            boolean vsWord = has(qn, " (vs|versus|against) ");
+            if (nums.size() >= 2 && (corrWord || (vsWord && numHits.size() >= 2))) {
+                Column xc = null, yc = null;
+                if (numHits.size() >= 2) {
+                    if (vsWord) {   // "price vs quantity": price on the y-axis
+                        yc = numHits.get(0);
+                        xc = numHits.get(1);
+                    } else {
+                        xc = numHits.get(0);
+                        yc = numHits.get(1);
+                    }
+                } else if (numHits.size() == 1) xc = numHits.get(0);
+                Column colour = null;
+                for (Column c : cats) if (mention(qn, c.name) >= 0 && !filteredCols.contains(c.name)) { colour = c; break; }
+                p.intent = "correlate";
+                p.x = xc == null ? null : xc.name;
+                p.metric = yc == null ? null : yc.name;
+                p.series = colour == null ? null : colour.name;
+                p.agg = "sum";
+                p.bucket = null;
+                p.sort = "none";
+                p.limit = null;
+                p.chart = "scatter";
+                p.message = null;
+                return p;
             }
 
             if (rowsIntent) {
@@ -2164,7 +3865,7 @@ public class DataChat extends JFrame {
 
                 Reply with ONE JSON object and nothing else (no prose, no markdown fences). Fields:
                 {
-                 "intent": "aggregate" | "drivers" | "rows" | "describe",
+                 "intent": "aggregate" | "drivers" | "rows" | "describe" | "correlate" | "anomalies",
                  "title": short chart title,
                  "metric": exact numeric column name, or null to count rows,
                  "agg": "sum" | "avg" | "count" | "min" | "max" | "median",
@@ -2174,7 +3875,7 @@ public class DataChat extends JFrame {
                  "filters": [ {"column": "...", "op": "=" | "!=" | ">" | "<" | ">=" | "<=" | "contains" | "in" | "not in", "value": "..." or ["a","b"] for in / not in} ],
                  "sort": "asc" | "desc" | "none",
                  "limit": integer or null,
-                 "chart": "bar" | "line" | "pie" | "none",
+                 "chart": "bar" | "line" | "pie" | "scatter" | "none",
                  "from": period label or null, "to": period label or null, "direction": "drop" | "rise",
                  "message": optional one-sentence note about an assumption you made
                 }
@@ -2185,6 +3886,12 @@ public class DataChat extends JFrame {
                 If no period is named, omit both and set "direction". The app ranks which segments of every text column explain the change, so do not add filters for the segments.
                 - "rows": list individual rows ("the ten biggest transactions"): metric = column to sort by, limit = how many, sort desc/asc, chart "none".
                 - "describe": overview of all columns.
+                - "correlate": the relationship between numeric columns ("is discount related to units?", "scatter plot of price vs quantity", "which columns are correlated?"). \
+                Set x to the numeric column for the x-axis and metric to the numeric column for the y-axis, chart "scatter", and optionally series to a text column to colour the points. \
+                Leave both null for a correlation matrix of all numeric columns, or set just one to find its strongest partner. Filters work as usual.
+                - "anomalies": unusual values or outliers ("any unusual transactions?", "which weeks look odd?", "outliers in amount by category"). \
+                Set metric to the numeric column to scan (null = scan every numeric column). To look for unusual rows, leave x null; set series to a text column to judge each value against its own group. \
+                To look for unusual time periods, set x to the date column and bucket to the period size (and agg for how to combine the metric). limit = how many to list. The app does the statistics.
                 - Use exact column names, and for text filters exact values from the column summary. Date filters use ISO text ("2026-03" or "2026-03-15") with ">=" / "<=" / "=".
                 - When the user does not name a measure, pick the most natural numeric column (money-like columns for revenue, sales, spend, transactions) with agg "sum".
                 - If the question refers to the previous question ("now split that by channel", "only North"), start from the previous plan and modify it.
@@ -2452,28 +4159,83 @@ public class DataChat extends JFrame {
     //  Chart rendering (pure Java2D - bar, horizontal bar, line, pie)
     // =====================================================================================
     static final class ChartPanel extends JPanel {
-        record Hit(Shape shape, String tip) {}
+        record Hit(Shape shape, String tip, int li, int si) {}
 
-        static final Color INK = new Color(0x222222), GRID = new Color(0xE3E3E3), AXIS = new Color(0x888888);
+        private Color INK = new Color(0x222222), GRID = new Color(0xE3E3E3), AXIS = new Color(0x888888);
         static final Color POS = new Color(0x2CA58D), NEG = new Color(0xE15759);
         static final Color[] PALETTE = {new Color(0x2E6FDB), new Color(0xF28E2B), new Color(0x2CA58D), new Color(0xE15759),
                 new Color(0x8E6BBF), new Color(0xEDC948), new Color(0x76B7B2), new Color(0xFF9DA7), new Color(0x9C755F), new Color(0xBAB0AC)};
 
         private final ChartData d;
         private final List<Hit> hits = new ArrayList<>();
+        private final java.util.function.BiConsumer<Integer, Integer> onPick;   // (label index, series index); null = not clickable
 
-        ChartPanel(ChartData d) {
+        ChartPanel(ChartData d) { this(d, null); }
+
+        /** Dark colours for on-screen use. Exports (PNG, PDF) always draw a fresh, light panel. */
+        void setDark(boolean on) {
+            INK = new Color(on ? 0xE6E6E6 : 0x222222);
+            GRID = new Color(on ? 0x3D3D3D : 0xE3E3E3);
+            AXIS = new Color(on ? 0x9A9A9A : 0x888888);
+            setBackground(on ? new Color(0x1E1E1E) : Color.WHITE);
+            setBorder(BorderFactory.createLineBorder(new Color(on ? 0x444444 : 0xDDDDDD)));
+            repaint();
+        }
+
+        ChartPanel(ChartData d, java.util.function.BiConsumer<Integer, Integer> onPick) {
             this.d = d;
+            this.onPick = onPick;
             setBackground(Color.WHITE);
             setPreferredSize(new Dimension(520, 300));
             setBorder(BorderFactory.createLineBorder(new Color(0xDDDDDD)));
             setToolTipText("");
+            addMouseListener(new MouseAdapter() {
+                @Override
+                public void mousePressed(MouseEvent e) { popup(e); }
+
+                @Override
+                public void mouseReleased(MouseEvent e) { popup(e); }
+            });
+            if (onPick != null) {
+                addMouseListener(new MouseAdapter() {
+                    @Override
+                    public void mouseClicked(MouseEvent e) {
+                        Hit h = hitAt(e.getPoint());
+                        if (h != null && h.li() >= 0) onPick.accept(h.li(), h.si());
+                    }
+                });
+                addMouseMotionListener(new java.awt.event.MouseMotionAdapter() {
+                    @Override
+                    public void mouseMoved(MouseEvent e) {
+                        Hit h = hitAt(e.getPoint());
+                        setCursor(h != null && h.li() >= 0 ? Cursor.getPredefinedCursor(Cursor.HAND_CURSOR) : Cursor.getDefaultCursor());
+                    }
+                });
+            }
+        }
+
+        private void popup(MouseEvent e) {
+            if (!e.isPopupTrigger()) return;
+            JPopupMenu menu = new JPopupMenu();
+            JMenuItem save = new JMenuItem("Save chart as PNG...");
+            save.addActionListener(a -> ChartExport.saveDialog(this, d));
+            JMenuItem copy = new JMenuItem("Copy chart to clipboard");
+            copy.addActionListener(a -> ChartExport.copy(this, d));
+            menu.add(save);
+            menu.add(copy);
+            menu.show(e.getComponent(), e.getX(), e.getY());
+        }
+
+        private Hit hitAt(Point pt) {
+            for (int i = hits.size() - 1; i >= 0; i--) if (hits.get(i).shape().contains(pt)) return hits.get(i);
+            return null;
         }
 
         @Override
         public String getToolTipText(MouseEvent e) {
-            for (int i = hits.size() - 1; i >= 0; i--) if (hits.get(i).shape().contains(e.getPoint())) return hits.get(i).tip();
-            return null;
+            Hit h = hitAt(e.getPoint());
+            if (h == null) return null;
+            return h.li() >= 0 && onPick != null ? h.tip() + "   (click to drill down)" : h.tip();
         }
 
         static Color color(int s) { return PALETTE[s % PALETTE.length]; }
@@ -2521,11 +4283,12 @@ public class DataChat extends JFrame {
             g.setColor(INK);
             g.drawString(clip(g, d.title, w - 24), 12, 22);
             g.setFont(base);
-            if (d.values.isEmpty() || d.labels.isEmpty()) {
+            if (d.type == ChartType.SCATTER ? d.sx.isEmpty() : (d.values.isEmpty() || d.labels.isEmpty())) {
                 g.dispose();
                 return;
             }
             switch (d.type) {
+                case SCATTER -> scatter(g, w, h, 34);
                 case PIE -> pie(g, w, h, 34);
                 case HBAR -> hbar(g, w, h, 34);
                 default -> cartesian(g, w, h, 34);
@@ -2621,7 +4384,7 @@ public class DataChat extends JFrame {
                         if (Double.isNaN(vs[i])) continue;
                         double x = left + (i + 0.5) * slot, y = yOf.applyAsDouble(vs[i]);
                         if (n <= 60) g.fill(new Ellipse2D.Double(x - 3, y - 3, 6, 6));
-                        hits.add(new Hit(new Ellipse2D.Double(x - 7, y - 7, 14, 14), tip(i, s, vs[i])));
+                        hits.add(new Hit(new Ellipse2D.Double(x - 7, y - 7, 14, 14), tip(i, s, vs[i]), i, s));
                     }
                 }
             } else {
@@ -2636,7 +4399,7 @@ public class DataChat extends JFrame {
                         Rectangle2D.Double rr = new Rectangle2D.Double(x, Math.min(y, yz), Math.max(1, barW - 1), Math.max(1, Math.abs(y - yz)));
                         g.setColor(d.signColors ? (v >= 0 ? POS : NEG) : color(s));
                         g.fill(rr);
-                        hits.add(new Hit(rr, tip(i, s, v)));
+                        hits.add(new Hit(rr, tip(i, s, v), i, s));
                     }
                 }
             }
@@ -2709,13 +4472,114 @@ public class DataChat extends JFrame {
                     Rectangle2D.Double rr = new Rectangle2D.Double(Math.min(xe, xz), y, Math.max(1, Math.abs(xe - xz)), Math.max(1, barH - 1));
                     g.setColor(d.signColors ? (v >= 0 ? POS : NEG) : color(s));
                     g.fill(rr);
-                    hits.add(new Hit(rr, tip(i, s, v)));
+                    hits.add(new Hit(rr, tip(i, s, v), i, s));
                     g.setColor(INK);
                     String vl = Fmt.compact(v);
                     int tw = fm.stringWidth(vl);
                     int tx = v >= 0 ? (int) (xe + 4) : (int) (xe - 4 - tw);
                     g.drawString(vl, tx, (int) (y + barH / 2 + fm.getAscent() / 2.0 - 1));
                 }
+            }
+        }
+
+        // ---------------------------------------------------------------- scatter
+        private void scatter(Graphics2D g, int w, int h, int top0) {
+            FontMetrics fm = g.getFontMetrics();
+            int top = legend(g, w, top0);
+            double xmin = Double.POSITIVE_INFINITY, xmax = Double.NEGATIVE_INFINITY, ymin = xmin, ymax = xmax;
+            for (int s = 0; s < d.sx.size(); s++)
+                for (int k = 0; k < d.sx.get(s).length; k++) {
+                    xmin = Math.min(xmin, d.sx.get(s)[k]);
+                    xmax = Math.max(xmax, d.sx.get(s)[k]);
+                    ymin = Math.min(ymin, d.sy.get(s)[k]);
+                    ymax = Math.max(ymax, d.sy.get(s)[k]);
+                }
+            if (!(xmin <= xmax)) return;
+            if (xmax == xmin) xmax = xmin + 1;
+            if (ymax == ymin) ymax = ymin + 1;
+            double xstep = niceStep((xmax - xmin) / 6), ystep = niceStep((ymax - ymin) / 5);
+            final double xlo = Math.floor(xmin / xstep + 1e-9) * xstep, xhi = Math.max(Math.ceil(xmax / xstep - 1e-9) * xstep, xlo + xstep);
+            final double ylo = Math.floor(ymin / ystep + 1e-9) * ystep, yhi = Math.max(Math.ceil(ymax / ystep - 1e-9) * ystep, ylo + ystep);
+            int yt = (int) Math.round((yhi - ylo) / ystep), xt = (int) Math.round((xhi - xlo) / xstep);
+            int tickW = 0;
+            for (int k = 0; k <= yt; k++) tickW = Math.max(tickW, fm.stringWidth(Fmt.compact(ylo + k * ystep)));
+            int left = tickW + 36, right = 18, bottom = fm.getHeight() * 2 + 14;
+            final int plotX = left, plotY = top, plotW = w - left - right, plotH = h - top - bottom;
+            if (plotW < 60 || plotH < 50) return;
+            java.util.function.DoubleUnaryOperator xOf = v -> plotX + (v - xlo) / (xhi - xlo) * plotW;
+            java.util.function.DoubleUnaryOperator yOf = v -> plotY + (yhi - v) / (yhi - ylo) * plotH;
+
+            g.setStroke(new BasicStroke(1f));
+            for (int k = 0; k <= yt; k++) {
+                double v = ylo + k * ystep;
+                int y = (int) Math.round(yOf.applyAsDouble(v));
+                g.setColor(GRID);
+                g.drawLine(plotX, y, plotX + plotW, y);
+                g.setColor(AXIS);
+                String lab = Fmt.compact(v);
+                g.drawString(lab, plotX - 6 - fm.stringWidth(lab), y + fm.getAscent() / 2 - 1);
+            }
+            for (int k = 0; k <= xt; k++) {
+                double v = xlo + k * xstep;
+                int x = (int) Math.round(xOf.applyAsDouble(v));
+                g.setColor(GRID);
+                g.drawLine(x, plotY, x, plotY + plotH);
+                g.setColor(AXIS);
+                String lab = Fmt.compact(v);
+                g.drawString(lab, x - fm.stringWidth(lab) / 2, plotY + plotH + 4 + fm.getAscent());
+            }
+            g.setColor(AXIS);
+            g.drawRect(plotX, plotY, plotW, plotH);
+            // axis titles
+            g.setColor(INK);
+            String xl = clip(g, d.xLabel, plotW);
+            g.drawString(xl, plotX + (plotW - fm.stringWidth(xl)) / 2, plotY + plotH + 8 + fm.getHeight() + fm.getAscent());
+            Graphics2D gr = (Graphics2D) g.create();
+            String yl = clip(g, d.yLabel, plotH);
+            gr.rotate(-Math.PI / 2, 14, plotY + plotH / 2.0);
+            gr.drawString(yl, (float) (14 - fm.stringWidth(yl) / 2.0), (float) (plotY + plotH / 2.0 + 4));
+            gr.dispose();
+
+            // points
+            int total = 0;
+            for (double[] a : d.sx) total += a.length;
+            boolean tips = total <= 1500;
+            for (int s = 0; s < d.sx.size(); s++) {
+                Color c = color(s);
+                g.setColor(new Color(c.getRed(), c.getGreen(), c.getBlue(), 150));
+                for (int k = 0; k < d.sx.get(s).length; k++) {
+                    double px = xOf.applyAsDouble(d.sx.get(s)[k]), py = yOf.applyAsDouble(d.sy.get(s)[k]);
+                    g.fill(new Ellipse2D.Double(px - 3.2, py - 3.2, 6.4, 6.4));
+                    if (tips)
+                        hits.add(new Hit(new Ellipse2D.Double(px - 5, py - 5, 10, 10),
+                                d.xLabel + ": " + Fmt.full(d.sx.get(s)[k]) + ",  " + d.yLabel + ": " + Fmt.full(d.sy.get(s)[k]), -1, -1));
+                }
+            }
+
+            // fitted line (clipped to the plot) and a small caption
+            if (d.fit != null) {
+                double a = d.fit[1], b = d.fit[0];
+                double x0 = xlo, x1 = xhi, y0 = a + b * x0, y1 = a + b * x1;
+                if (b != 0) {   // clip to the y range
+                    double xa = (ylo - a) / b, xb = (yhi - a) / b;
+                    double lo = Math.min(xa, xb), hi = Math.max(xa, xb);
+                    x0 = Math.max(x0, lo);
+                    x1 = Math.min(x1, hi);
+                    y0 = a + b * x0;
+                    y1 = a + b * x1;
+                }
+                if (x0 < x1) {
+                    g.setColor(INK);
+                    g.setStroke(new BasicStroke(1.6f, BasicStroke.CAP_BUTT, BasicStroke.JOIN_MITER, 10f, new float[]{6f, 4f}, 0f));
+                    g.draw(new Line2D.Double(xOf.applyAsDouble(x0), yOf.applyAsDouble(y0), xOf.applyAsDouble(x1), yOf.applyAsDouble(y1)));
+                    g.setStroke(new BasicStroke(1f));
+                }
+                String cap = String.format(Locale.US, "r = %.2f    n = %,d", d.fit[2], (long) d.fit[3]);
+                int cw = fm.stringWidth(cap) + 12;
+                g.setColor(new Color(getBackground().getRed(), getBackground().getGreen(), getBackground().getBlue(), 220));
+                g.fillRect(plotX + plotW - cw - 6, plotY + 6, cw, fm.getHeight() + 6);
+                g.setColor(INK);
+                g.drawString(cap, plotX + plotW - cw, plotY + 6 + fm.getAscent() + 3);
             }
         }
 
@@ -2737,10 +4601,10 @@ public class DataChat extends JFrame {
                 Arc2D.Double arc = new Arc2D.Double(cx, cy, size, size, start, ext, Arc2D.PIE);
                 g.setColor(color(i));
                 g.fill(arc);
-                g.setColor(Color.WHITE);
+                g.setColor(getBackground());
                 g.setStroke(new BasicStroke(1.5f));
                 g.draw(arc);
-                hits.add(new Hit(arc, d.labels.get(i) + ": " + Fmt.full(vs[i]) + " (" + Fmt.share(vs[i] / sum) + ")"));
+                hits.add(new Hit(arc, d.labels.get(i) + ": " + Fmt.full(vs[i]) + " (" + Fmt.share(vs[i] / sum) + ")", i, 0));
                 start += ext;
             }
             int lx = cx + size + 24, ly = top + Math.max(0, (h - top - vs.length * (fm.getHeight() + 6)) / 2);
@@ -2762,6 +4626,8 @@ public class DataChat extends JFrame {
     static final class DemoData {
         static DataTable create() {
             Random rnd = new Random(42);
+            Random r2 = new Random(7);   // separate stream: the original columns stay exactly as before
+            double[] unitPrice = {60, 45, 130, 15};
             String[] regions = {"North", "South", "East", "West", "Central"};
             double[] regionW = {1.0, 1.25, 0.9, 1.1, 0.75};
             String[] cats = {"Hardware", "Software", "Services", "Subscriptions"};
@@ -2770,7 +4636,7 @@ public class DataChat extends JFrame {
             String[] channels = {"Online", "Retail", "Partner"};
             double[] chanW = {0.50, 0.30, 0.20};
             List<String[]> recs = new ArrayList<>();
-            recs.add(new String[]{"TransactionID", "Date", "Region", "Category", "Channel", "Status", "Amount"});
+            recs.add(new String[]{"TransactionID", "Date", "Region", "Category", "Channel", "Status", "Amount", "Units", "Discount (%)"});
             int id = 10000;
             LocalDate start = LocalDate.of(2026, 1, 1), end = LocalDate.of(2026, 6, 30);
             long span = ChronoUnit.DAYS.between(start, end);
@@ -2791,8 +4657,10 @@ public class DataChat extends JFrame {
                     double amount = catMean[ci] * Math.exp(sigma * rnd.nextGaussian() - sigma * sigma / 2);
                     double u = rnd.nextDouble();
                     String status = u < 0.04 ? "Refunded" : u < 0.07 ? "Pending" : "Completed";
+                    int units = (int) Math.max(1, Math.round(amount / unitPrice[ci] * Math.exp(0.12 * r2.nextGaussian())));
+                    double disc = Math.max(0, Math.min(30, 2 + 0.5 * units + 3.5 * r2.nextGaussian()));
                     recs.add(new String[]{"T" + (id++), d.toString(), regions[ri], cats[ci], channels[chi], status,
-                            String.format(Locale.US, "%.2f", amount)});
+                            String.format(Locale.US, "%.2f", amount), String.valueOf(units), String.format(Locale.US, "%.1f", disc)});
                 }
             }
             try {
@@ -2820,7 +4688,9 @@ public class DataChat extends JFrame {
                         "Monthly revenue by category",
                         "Share of revenue by channel as a pie chart",
                         "Average amount by category, excluding refunded",
-                        "Top 5 largest transactions");
+                        "Scatter plot of amount vs units",
+                        "Is discount related to amount?",
+                        "Any unusual transactions?");
             }
             List<String> out = new ArrayList<>();
             out.add("Describe this data");
@@ -2842,7 +4712,107 @@ public class DataChat extends JFrame {
             if (metric != null && time != null) out.add("What's driving the biggest drop in " + metric.name + "?");
             if (metric != null && dim2 != null) out.add("Average " + metric.name + " by " + dim2.name);
             if (metric != null && dim != null) out.add("Top 5 " + dim.name + " by " + metric.name);
+            if (t.colsOfType(ColType.NUMBER).size() >= 2) out.add("Which numeric columns are related?");
+            if (metric != null) out.add("Are there any unusual " + metric.name + " values?");
             return out;
+        }
+    }
+
+
+    // =====================================================================================
+    //  Drill-down: what a click on a chart element means
+    // =====================================================================================
+    static final class Drill {
+        record Drilled(String question, Plan plan) {}
+
+        /**
+         * Clicking a period (bar or point on a time axis) compares it with the previous period; clicking the
+         * first period breaks it down by a category. Clicking a category or segment filters to it and shows how
+         * it behaves over time (or, with no date column, a further breakdown).
+         */
+        static Drilled plan(DataTable t, ChartData cd, int li, int si) {
+            if (cd.basePlan == null || li < 0 || li >= cd.labels.size()) return null;
+            Plan p = cd.basePlan.copy();
+            p.title = null;
+            p.message = null;
+            p.sort = "none";
+            p.limit = null;
+            p.chart = "auto";
+            p.intent = "aggregate";
+            p.from = null;
+            p.to = null;
+            p.x = null;
+            p.series = null;
+            p.bucket = null;
+            List<Filter> filters = new ArrayList<>(cd.basePlan.filters);
+            List<String> what = new ArrayList<>();
+            if (si >= 0 && cd.series.size() > 1 && cd.seriesFilters != null && si < cd.seriesFilters.size() && cd.seriesFilters.get(si) != null) {
+                filters = LocalPlanner.mergeFilters(filters, cd.seriesFilters.get(si), false);
+                what.add(cd.series.get(si));
+            }
+            String label = cd.labels.get(li);
+            String ctx = what.isEmpty() ? "" : " for " + String.join(", ", what);
+            Column time = t.firstOfType(ColType.DATE);
+
+            if (cd.periodX) {
+                if (cd.timeCol == null || "weekday".equals(cd.bucket)) return null;
+                p.filters = filters;
+                if (li > 0) {
+                    p.intent = "drivers";
+                    p.x = cd.timeCol;
+                    p.bucket = cd.bucket;
+                    p.from = cd.labels.get(li - 1);
+                    p.to = label;
+                    return new Drilled("What changed in " + label + " compared with " + cd.labels.get(li - 1) + ctx + "?", p);
+                }
+                String[] range = periodRange(label);   // first period: nothing earlier to compare with, so break it down
+                if (range == null) return null;
+                filters = LocalPlanner.mergeFilters(filters, List.of(new Filter(cd.timeCol, ">=", List.of(range[0])),
+                        new Filter(cd.timeCol, "<=", List.of(range[1]))), false);
+                p.filters = filters;
+                p.x = bestBreakdown(t, filters);
+                return new Drilled("Break down " + label + ctx, p);
+            }
+
+            if (cd.labelFilters == null || li >= cd.labelFilters.size()) return null;
+            filters = LocalPlanner.mergeFilters(filters, cd.labelFilters.get(li), false);
+            p.filters = filters;
+            if (time != null) {
+                p.x = time.name;     // bucket left empty: chosen from the date span
+            } else {
+                p.x = bestBreakdown(t, filters);
+            }
+            String subject = cd.xLabel != null && !cd.xLabel.isEmpty() && !label.contains(" = ") ? cd.xLabel + " = " + label : label;
+            return new Drilled("Drill into " + subject + ctx + (time != null ? ": how has it changed over time?" : ""), p);
+        }
+
+        /** A categorical column not already pinned to a single value, preferring 3 to 12 distinct values. */
+        static String bestBreakdown(DataTable t, List<Filter> filters) {
+            Set<String> pinned = new HashSet<>();
+            for (Filter f : filters) if (f.op().equals("=") || f.op().equals("in")) pinned.add(f.column());
+            Column best = null;
+            for (Column c : t.cols) {
+                int dc = c.type == ColType.TEXT ? c.distinctCount() : 0;
+                if (dc < 2 || dc > 30 || dc > 0.5 * t.rows || pinned.contains(c.name)) continue;
+                if (best == null || (best.distinctCount() < 3 || best.distinctCount() > 12) && dc >= 3 && dc <= 12) best = c;
+            }
+            return best == null ? null : best.name;
+        }
+
+        static String[] periodRange(String l) {
+            if (l.matches("\\d{4}-\\d{2}-\\d{2}") || l.matches("\\d{4}-\\d{2}") || l.matches("\\d{4}")) return new String[]{l, l};
+            Matcher q = Pattern.compile("(\\d{4})-Q([1-4])").matcher(l);
+            if (q.matches()) {
+                int y = Integer.parseInt(q.group(1)), n = Integer.parseInt(q.group(2));
+                return new String[]{String.format("%04d-%02d", y, (n - 1) * 3 + 1), String.format("%04d-%02d", y, n * 3)};
+            }
+            Matcher w = Pattern.compile("(\\d{4})-W(\\d{2})").matcher(l);
+            if (w.matches()) {
+                LocalDate start = LocalDate.of(Integer.parseInt(w.group(1)), 1, 4)
+                        .with(IsoFields.WEEK_OF_WEEK_BASED_YEAR, Integer.parseInt(w.group(2))).with(ChronoField.DAY_OF_WEEK, 1);
+                return new String[]{start.toString(), start.plusDays(6).toString()};
+            }
+            return null;
         }
     }
 
@@ -2992,22 +4962,24 @@ public class DataChat extends JFrame {
 
         private static void outliers(DataTable t, Column m, List<Insight> out) {
             if (m == null) return;
-            double[] v = Arrays.stream(m.num).filter(d -> !Double.isNaN(d)).sorted().toArray();
+            double[] v = Arrays.stream(m.num).filter(d -> !Double.isNaN(d)).toArray();
             int n = v.length;
             if (n < 20) return;
-            double q1 = v[n / 4], q3 = v[(3 * n) / 4], iqr = q3 - q1;
-            if (iqr <= 0) return;
-            double fence = q3 + 3 * iqr;
-            int count = 0;
-            for (double d : v) if (d > fence) count++;
+            Engine.Scored s = Engine.robustScores(v);
+            if (s == null) return;
+            int hi = 0, lo = 0;
+            for (double z : s.score()) {
+                if (z > Engine.ANOMALY_Z) hi++;
+                else if (z < -Engine.ANOMALY_Z) lo++;
+            }
+            int count = hi + lo;
             if (count == 0 || count > 0.05 * n) return;
             Plan p = new Plan();
-            p.intent = "rows";
+            p.intent = "anomalies";
             p.metric = m.name;
-            p.sort = "desc";
             p.limit = Math.min(count, 20);
-            p.chart = "none";
-            out.add(new Insight(count + " unusually large " + m.name + " value" + (count == 1 ? "" : "s") + " (max " + Fmt.full(v[n - 1]) + " vs median " + Fmt.full(v[n / 2]) + ")", p));
+            p.chart = "auto";
+            out.add(new Insight(count + " unusual " + m.name + " value" + (count == 1 ? "" : "s") + " (" + hi + " high, " + lo + " low; typical " + Fmt.full(s.typical()) + ")", p));
         }
 
         private static void missingData(DataTable t, List<Insight> out) {
@@ -3278,6 +5250,95 @@ public class DataChat extends JFrame {
         }
     }
 
+    static final class ChartExport {
+        static File dir;
+
+        static String fileName(ChartData cd) {
+            String base = cd.title == null || cd.title.isBlank() ? "chart" : cd.title;
+            base = base.replaceAll("[^A-Za-z0-9._ -]+", "").trim().replaceAll("\\s+", "_");
+            if (base.isEmpty()) base = "chart";
+            return base.length() > 60 ? base.substring(0, 60) : base;
+        }
+
+        /** The chart drawn at twice its on-screen size, so it stays sharp in slides and documents. */
+        static BufferedImage image(ChartData cd) { return ReportBuilder.render(cd, 2); }
+
+        static void writePng(ChartData cd, File f) throws IOException {
+            if (!ImageIO.write(image(cd), "png", f)) throw new IOException("This Java installation can't write PNG files.");
+        }
+
+        /** Asks where to save; returns the chosen .png file, or null if cancelled. */
+        static File choose(Component parent, String suggestion, String title) {
+            JFileChooser fc = new JFileChooser(dir);
+            fc.setDialogTitle(title);
+            fc.setFileFilter(new FileNameExtensionFilter("PNG image", "png"));
+            fc.setSelectedFile(new File(suggestion + ".png"));
+            if (fc.showSaveDialog(parent) != JFileChooser.APPROVE_OPTION) return null;
+            File f = fc.getSelectedFile();
+            if (!f.getName().toLowerCase(Locale.ROOT).endsWith(".png")) f = new File(f.getPath() + ".png");
+            if (f.exists() && JOptionPane.showConfirmDialog(parent, f.getName() + " already exists. Overwrite it?", "Save chart",
+                    JOptionPane.YES_NO_OPTION) != JOptionPane.YES_OPTION) return null;
+            return f;
+        }
+
+        static File saveDialog(Component parent, ChartData cd) {
+            File f = choose(parent, fileName(cd), "Save chart as PNG");
+            if (f == null) return null;
+            try {
+                writePng(cd, f);
+                dir = f.getParentFile();
+                return f;
+            } catch (IOException ex) {
+                JOptionPane.showMessageDialog(parent, "Could not save the chart: " + ex.getMessage());
+                return null;
+            }
+        }
+
+        /** Several charts stacked into one picture (what "Copy chart" puts on the clipboard when an answer has two). */
+        static BufferedImage combined(List<ChartData> charts) {
+            if (charts.size() == 1) return image(charts.get(0));
+            List<BufferedImage> imgs = new ArrayList<>();
+            int w = 0, h = 0;
+            for (ChartData cd : charts) {
+                BufferedImage im = image(cd);
+                imgs.add(im);
+                w = Math.max(w, im.getWidth());
+                h += im.getHeight() + 16;
+            }
+            BufferedImage out = new BufferedImage(w, h, BufferedImage.TYPE_INT_RGB);
+            Graphics2D g = out.createGraphics();
+            g.setColor(Color.WHITE);
+            g.fillRect(0, 0, w, h);
+            int y = 0;
+            for (BufferedImage im : imgs) {
+                g.drawImage(im, 0, y, null);
+                y += im.getHeight() + 16;
+            }
+            g.dispose();
+            return out;
+        }
+
+        static void copy(Component parent, ChartData cd) { copy(parent, image(cd)); }
+
+        static void copy(Component parent, BufferedImage img) {
+            try {
+                java.awt.datatransfer.Transferable tr = new java.awt.datatransfer.Transferable() {
+                    public DataFlavor[] getTransferDataFlavors() { return new DataFlavor[]{DataFlavor.imageFlavor}; }
+
+                    public boolean isDataFlavorSupported(DataFlavor fl) { return DataFlavor.imageFlavor.equals(fl); }
+
+                    public Object getTransferData(DataFlavor fl) throws java.awt.datatransfer.UnsupportedFlavorException {
+                        if (!isDataFlavorSupported(fl)) throw new java.awt.datatransfer.UnsupportedFlavorException(fl);
+                        return img;
+                    }
+                };
+                Toolkit.getDefaultToolkit().getSystemClipboard().setContents(tr, null);
+            } catch (HeadlessException | IllegalStateException ex) {
+                JOptionPane.showMessageDialog(parent, "Could not copy the chart: " + ex.getMessage());
+            }
+        }
+    }
+
     static final class ReportBuilder {
         static byte[] build(DataTable t, boolean demo, List<String> insightLines, List<ReportEntry> log) throws IOException {
             Color ink = new Color(0x222222), grey = new Color(0x777777), blue = new Color(0x1a5fb4);
@@ -3333,14 +5394,17 @@ public class DataChat extends JFrame {
             return cd.type == ChartType.HBAR ? Math.max(340, Math.min(760, 120 + 30 * cd.labels.size())) : 420;
         }
 
-        static BufferedImage render(ChartData cd) {
+        static BufferedImage render(ChartData cd) { return render(cd, 1); }
+
+        static BufferedImage render(ChartData cd, int scale) {
             int w = 1000, h = chartHeight(cd);
             ChartPanel cp = new ChartPanel(cd);
             cp.setSize(w, h);
-            BufferedImage img = new BufferedImage(w, h, BufferedImage.TYPE_INT_RGB);
+            BufferedImage img = new BufferedImage(w * scale, h * scale, BufferedImage.TYPE_INT_RGB);
             Graphics2D g = img.createGraphics();
             g.setColor(Color.WHITE);
-            g.fillRect(0, 0, w, h);
+            g.fillRect(0, 0, w * scale, h * scale);
+            g.scale(scale, scale);
             cp.print(g);
             g.dispose();
             return img;

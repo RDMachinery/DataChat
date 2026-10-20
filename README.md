@@ -1,16 +1,14 @@
-![Screenshot](screenshot.jpeg)
-
 # DataChat
 
+**Ask your CSV or Excel data questions in plain English and get an answer plus a chart.**
 
-**Ask your CSV questions in plain English and get an answer plus a chart.**
-
-No pivot tables, no remembering which formula does what. Load a CSV and type things like:
+No pivot tables, no remembering which formula does what. Load a CSV or Excel file and type things like:
 
 - *"What's driving the drop in March?"*
 - *"Chart the financial transactions by region"*
 - *"Monthly revenue by category, excluding refunded"*
 - *"Share of revenue by channel as a pie chart"*
+- *"Are there any unusual transactions?"*
 
 DataChat is a single-file Java Swing desktop app with **no external dependencies**. It works with Claude (Anthropic API) for natural-language understanding, and it also ships with a built-in **offline engine and demo data** so you can try it without an API key.
 
@@ -21,6 +19,12 @@ DataChat is a single-file Java Swing desktop app with **no external dependencies
 - [Quick start](#quick-start)
 - [Using the app](#using-the-app)
 - [Auto-insights](#auto-insights)
+- [Follow-up questions](#follow-up-questions)
+- [Click a chart to drill down](#click-a-chart-to-drill-down)
+- [Correlation and scatter plots](#correlation-and-scatter-plots)
+- [Unusual values and outliers](#unusual-values-and-outliers)
+- [Saving charts as images](#saving-charts-as-images)
+- [Dark mode](#dark-mode)
 - [PDF report](#pdf-report)
 - [Example questions](#example-questions)
 - [How it works](#how-it-works)
@@ -29,6 +33,7 @@ DataChat is a single-file Java Swing desktop app with **no external dependencies
 - [Privacy](#privacy)
 - [Offline mode](#offline-mode)
 - [CSV handling](#csv-handling)
+- [Excel files](#excel-files)
 - [Limitations](#limitations)
 - [Troubleshooting](#troubleshooting)
 - [Code tour](#code-tour)
@@ -70,9 +75,9 @@ The key is held in memory only and is never written to disk. Without a key (or w
 
 | Area | What it does |
 |---|---|
-| **Toolbar** | Two rows. Top: **Load CSV...**, **Demo data** and **Export PDF report...** (greyed out until you've asked a question). Bottom: Claude API key, model name, Offline mode and the sample-rows privacy toggle |
+| **Toolbar** | Two rows. Top: **Load CSV / Excel...**, **Demo data**, **Export PDF report...** (greyed out until you've asked a question) and the **Dark mode** checkbox. Bottom: Claude API key, model name, Offline mode and the sample-rows privacy toggle |
 | **Chat (left)** | Your questions, the analyst's plain-English answers, the auto-insights for the loaded file, and clickable example questions |
-| **Chart tab** | The chart(s) for the latest answer. Hover for exact values. **Save chart as PNG...** exports it |
+| **Chart tab** | The chart(s) for the latest answer. Hover for exact values, and **click a bar, point or slice to drill down** (see below). **Save chart as PNG...**, **Copy chart** and a right-click on the chart save or copy it as an image (see [Saving charts as images](#saving-charts-as-images)) |
 | **Result table tab** | The exact numbers behind the answer. **Save result as CSV...** exports them (see [Exporting results](#exporting-results)) |
 | **Your data tab** | A scrollable view of the loaded CSV |
 | **How it was computed tab** | The JSON plan that was executed, how many rows were used, and the computed facts |
@@ -81,12 +86,12 @@ The status bar shows the loaded file, row and column counts, and which engine is
 
 ### Loading data
 
-- Click **Load CSV...**, or **drag and drop** a `.csv`, `.tsv` or `.txt` file onto the window.
+- Click **Load CSV / Excel...**, or **drag and drop** a `.csv`, `.tsv`, `.txt`, `.xlsx` or `.xlsm` file onto the window. Excel files are covered in [Excel files](#excel-files).
 - Click **Demo data** to load (or reload) the built-in sample.
 
 ### Demo data
 
-The demo is 2,317 synthetic financial transactions from January to June 2026 with these columns: `TransactionID, Date, Region, Category, Channel, Status, Amount`.
+The demo is 2,317 synthetic financial transactions from January to June 2026 with these columns: `TransactionID, Date, Region, Category, Channel, Status, Amount, Units, Discount (%)`. `Units` and `Discount (%)` are there so you can try the correlation and scatter-plot questions.
 
 It contains a deliberate story: **March dips** because the North region (store closures) and the Hardware category (supply shortage) sell much less. Ask *"What's driving the drop in March?"* and the analysis should surface exactly those two.
 
@@ -109,6 +114,107 @@ At most five insights are shown, in that priority order. Details:
 - A last month that stops part-way through is ignored when looking for drops, so an incomplete month never shows up as a fake slump.
 - Insights are computed locally, so they never call the API. Clicking *explore* does use Claude for the explanation if a key is set.
 - The insights are also printed in the [PDF report](#pdf-report).
+
+### Follow-up questions
+
+You can refine an answer instead of retyping the whole question. This works with Claude (the last three question/plan pairs are sent as context) and, new, in **offline mode** too, where the app keeps the previous plan and changes only what you say.
+
+| Say | What changes |
+|---|---|
+| `Now split that by channel` | Adds Channel as a second grouping (separate lines or bars) and keeps everything else |
+| `Only North` / `What about South?` | Adds a filter. A new filter on the same column replaces the old one |
+| `And in Q2` | Replaces the date window |
+| `Average instead` | Changes the aggregation, keeps the grouping and filters |
+| `As a pie chart` / `as a bar chart` | Changes the chart type only |
+| `Now by region` | Replaces the grouping (without a "split" word, the new column replaces the old one) |
+| `Top 3` | Limits and sorts the previous answer |
+| `Colour by category` | After a scatter plot, colours the points by a text column |
+| `Clear filters` | Removes all earlier filters |
+| `Start over` / `new question` | Ignores the previous question |
+
+Notes:
+
+- The answer says what it changed ("Follow-up to your previous question: split by Channel") and reminds you when earlier filters are still applied.
+- A follow-up is recognised by short sentences that start with words like *now, and, also, only, just, what about, split, colour* or refer back (*that, it, same*), or by very short questions such as `by region` or `top 3`. A full question such as `Monthly revenue by category` always starts fresh.
+- After a driver analysis ("what's driving the drop in March?"), `only Hardware` re-runs the same analysis on Hardware, and `now by region` turns it into an ordinary grouped answer.
+- If nothing in the follow-up is recognised, it is treated as a new question.
+
+### Click a chart to drill down
+
+Charts are clickable. Hover shows the exact value and a hint (*click to drill down*), and the cursor turns into a hand. A click runs a follow-up analysis straight away, with no typing:
+
+| You click | What runs |
+|---|---|
+| A **period** on a time axis (month, week, quarter...) | *What changed in that period compared with the previous one?* (the driver analysis). On the first period, which has nothing before it, a breakdown of that period instead |
+| A **category** bar or slice (a region, a channel...) | The data filtered to that category, shown over time (or broken down further if the file has no date column) |
+| A **segment** in the driver chart (for example `Region = North`) | That segment over time |
+| A bar or point in a **multi-series** chart | The same, restricted to that series too (for example March, Services only) |
+
+Filters from the chart you clicked carry over, so drilling is cumulative. Weekday charts and scatter plots are not clickable. With a Claude key, the drill-down answer is explained by Claude like any other question.
+
+### Correlation and scatter plots
+
+Ask how numeric columns relate and you get a scatter plot with a fitted line, plus the statistics.
+
+| Ask | You get |
+|---|---|
+| `Scatter plot of amount vs units` | Scatter of Amount (y) against Units (x). *"A vs B"* puts A on the y-axis |
+| `Is discount related to amount?` | The same for the two columns you named |
+| `Correlation between units and amount by category` | Points coloured by Category (up to 6 groups) |
+| `Which numeric columns are related?` | A correlation matrix of all numeric columns, plus a scatter of the strongest pair |
+| `What is units correlated with?` | The strongest partner of the one column you named |
+
+What you see:
+
+- **Chart:** points, a dashed least-squares line, and a caption with *r* and *n*. Tooltips show exact values (up to 1,500 points; larger sets are sampled to about 4,000 for drawing, while all statistics use every row).
+- **Result table:** row count, Pearson *r*, Spearman rank correlation, R-squared, slope, intercept and the two means (or the full matrix).
+- **Plain-English answer:** strength and direction (negligible, weak, moderate, strong, very strong), what each +1 in x goes with in y, and warnings. It tells you when a result is within random noise for the sample size, when Spearman and Pearson disagree (a curved relationship or outliers), and that correlation does not prove causation.
+
+Filters work as usual (*"correlation of amount and units for North in Q2"*). Colouring a scatter by category is a quick way to spot a relationship that is really a difference between groups: in the demo data, each Category forms its own band.
+
+### Unusual values and outliers
+
+Ask for anything odd, unusual, abnormal, suspicious or out of the ordinary, or for *outliers* or *anomalies*, and DataChat runs a statistical check and shows what stands out.
+
+| Ask | You get |
+|---|---|
+| `Any unusual transactions?` | Every numeric column is scanned. The table lists the most extreme values with their whole row, and the chart counts the unusual values per column |
+| `Are there any outliers in amount?` | One column scanned. A bar chart of the most extreme rows, labelled with their row number and category columns |
+| `Show me odd amounts by category` | Each value is judged against **its own category** (a 300 order may be normal for Hardware and strange for Subscriptions) |
+| `Which weeks look unusual?` / `Which days had unusual revenue?` | **Time-period mode:** totals per day, week, month, quarter or year, drawn as a line with the unusual periods shaded and a second line showing what "normal" would have been |
+| `Top 5 outliers in units` | Only the five most extreme |
+| `Unusual transactions in March` | Filters work as usual, so the check runs on the matching rows only |
+
+How it decides:
+
+- **Rows:** each value gets a robust z-score based on the **median and the median absolute deviation (MAD)**, so the outliers themselves cannot hide the spread the way they can with a mean and standard deviation. A value is flagged when its score is beyond **+/-3.5**, the usual cut-off for this method. Scores in the table keep their sign: `+8.8` is unusually high, `-12.7` unusually low.
+- **Skewed money columns:** if every value is positive and the column is clearly right-skewed (mean more than 1.5 times the median), values are judged on a **log scale**, otherwise ordinary long-tailed amounts would all be flagged. The answer tells you when it did this.
+- **Time periods:** each period is compared with the median of nearby periods (the same weekday up to four weeks either side for daily data, otherwise the three periods either side), then the differences are scored the same way. This copes with a steady trend and with weekday patterns. If the data only spans a few months, month questions automatically drop to weeks, and a partly-covered first or last period is left out of totals and counts so it isn't mistaken for a dip.
+- **Table:** `Data row` (the position among data rows, header not counted), `Column`, `Value`, `Typical` (the median), `Score`, then every column of that row. Up to 15 rows are listed by default; ask for a different number (*"top 30 outliers"*) up to 200. **Save result as CSV...** keeps the original text of each cell.
+- **Not tested:** columns where most values are identical (there is no spread to measure) or where fewer than 8 values are available. The answer says which.
+
+Follow-ups work: after *"any unusual transactions?"*, try *"only North"*, *"now by category"* or *"just units"*. The auto-insights on load also include a one-line outlier summary for the main measure, which opens this same analysis when clicked.
+
+Things to keep in mind: unusual does not mean wrong, it means different from the rest, so check each one. The cut-off is fixed at 3.5. Outliers are judged one column at a time, so a combination that is odd only when two columns are read together (a huge discount on a tiny order, say) won't be found.
+
+### Saving charts as images
+
+On the **Chart** tab, above the chart:
+
+- **Save chart as PNG...** writes the chart to an image file. When an answer has two charts (driver analyses do), each is saved as its own file, with `-1` and `-2` added to the name you choose, which suits slides.
+- **Copy chart** puts the chart on the clipboard so you can paste it straight into a slide, email or document. If there are two charts they are stacked into one picture.
+- **Right-click any chart** for **Save chart as PNG...** or **Copy chart to clipboard** for just that chart.
+
+Images are drawn at twice the on-screen size (about 2000 pixels wide) so they stay sharp. They include the title, legend and axes, and any highlighted periods. The suggested file name comes from the chart title, and DataChat asks before overwriting an existing file. The clipboard needs a desktop that supports image clipboards; if it can't, you'll get a message and can save a PNG instead.
+
+### Dark mode
+
+Tick **Dark mode** on the top toolbar row for a dark colour scheme that is easier on the eyes in a dim room.
+
+- The whole window changes at once: chat, tabs, tables, buttons, dialogs and charts. Chart colours are adjusted so labels, gridlines and highlighted periods stay readable, and the chat's coloured names and links switch to lighter shades.
+- Your choice is **remembered** the next time you start DataChat. Untick the box to go back to light.
+- **Exports stay light.** Saved PNGs, copied charts and the PDF report are always drawn on white, so they look right in slides, documents and print.
+- Dark mode uses Java's built-in cross-platform ("Metal") look, so buttons and scroll bars look the same on Windows, macOS and Linux rather than following the system style. Unticking the box returns to your system's normal look. The window's title bar is drawn by your operating system and follows its own dark or light setting.
 
 ### PDF report
 
@@ -134,11 +240,11 @@ Open the **Result table** tab and click **Save result as CSV...** to save the ta
 - The suggested file name comes from the answer's title.
 - Numbers are written as plain values (`12503.58`, not `+12,503.58`) so they open cleanly in Excel, Numbers or Google Sheets. Percentage columns such as `-59.4%` stay as text.
 - The file is UTF-8 with a byte-order mark, which Excel needs to display non-ASCII characters correctly, and fields containing commas, quotes or line breaks are quoted.
-- The chart isn't part of the CSV. Use **Save chart as PNG...** for that.
+- The chart isn't part of the CSV. Use **Save chart as PNG...** on the Chart tab for that (see [Saving charts as images](#saving-charts-as-images)).
 
 ### Asking questions
 
-Type in the box at the bottom of the chat and press Enter (or click **Ask**). With Claude enabled, follow-ups can build on the previous question, for example *"now split that by channel"* or *"only for North"*. The last three turns are sent as context.
+Type in the box at the bottom of the chat and press Enter (or click **Ask**). Short follow-ups such as *"now split that by channel"* or *"only for North"* build on your previous question (see [Follow-up questions](#follow-up-questions)).
 
 ---
 
@@ -157,6 +263,12 @@ Type in the box at the bottom of the chat and press Enter (or click **Ask**). Wi
 | `Revenue by weekday` | Totals for Mon to Sun |
 | `Show amount by region for Q2` | Date-filtered totals |
 | `Top 5 largest transactions` | The five biggest rows, as a table |
+| `Scatter plot of amount vs units` | Scatter plot with fitted line, *r* and *n* |
+| `Is discount related to amount?` | Correlation statistics and a scatter plot |
+| `Which numeric columns are related?` | Correlation matrix of all numeric columns |
+| `Now split that by channel` | A follow-up: refines the previous answer (see [Follow-up questions](#follow-up-questions)) |
+| `Any unusual transactions?` | Outlier scan across the numeric columns (see [Unusual values and outliers](#unusual-values-and-outliers)) |
+| `Which weeks look unusual?` | Line chart with the odd weeks shaded |
 | `Describe this data` | Column-by-column overview |
 
 ---
@@ -225,7 +337,7 @@ Claude (or the offline planner) produces one JSON object. The engine executes it
 
 | Field | Meaning |
 |---|---|
-| `intent` | `aggregate` (group + chart), `drivers` (explain a change), `rows` (list individual rows), `describe` (column overview) |
+| `intent` | `aggregate` (group + chart), `drivers` (explain a change), `rows` (list individual rows), `describe` (column overview), `correlate` (relationship between numeric columns), `anomalies` (unusual rows or periods: `metric` is the column to scan or `null` for all, `series` a group to compare within, `x` + `bucket` for time periods) |
 | `metric` | Numeric column to measure, or `null` to count rows |
 | `agg` | `sum`, `avg`, `count`, `min`, `max`, `median` |
 | `x` | Column for the x-axis or grouping (`null` = one overall number) |
@@ -233,7 +345,8 @@ Claude (or the offline planner) produces one JSON object. The engine executes it
 | `series` | Optional second grouping, drawn as separate colours (max 8 series) |
 | `filters` | `column`, `op` (`=`, `!=`, `>`, `<`, `>=`, `<=`, `contains`, `in`, `not in`) and `value`. Date filters accept partial ISO dates like `2026-03` |
 | `sort` / `limit` | Ordering and top-N. Categories default to descending by value; large category sets are capped at 20 |
-| `chart` | `bar`, `line`, `pie`, `none` (omitted means auto) |
+| `chart` | `bar`, `line`, `pie`, `scatter`, `none` (omitted means auto) |
+| *(correlate)* | `x` is the numeric column for the x-axis, `metric` the numeric column for the y-axis (leave both `null` for a matrix, or set one to find its strongest partner), and `series` an optional text column to colour by |
 | `from` / `to` / `direction` | For `drivers`: the periods to compare (for example `2026-02`, `2026-03`) and whether to look for a `drop` or a `rise` |
 
 Chart choice when `chart` is auto: time on the x-axis gives a line (or bars for very few points), categories give bars (horizontal when there are many or the labels are long), and pie is used only when requested with up to 10 positive slices.
@@ -277,8 +390,10 @@ With no API key (or **Offline mode** ticked), a built-in rule-based planner turn
 - **Filters:** category values appearing in the question (`North`, `Hardware`), exclusions (*excluding refunded*, *without retail*), and dates (*in March*, *Q2*, *2026*).
 - **Ranking and charts:** *top 5, bottom 3, lowest, best*, and *pie / line / bar*.
 - **Change questions:** *drop, fell, decline, rise, why, driving, compare X and Y*.
+- **Relationships:** *correlation, related, relationship, scatter, depends on*, or *A vs B* / *A against B* with two numeric columns.
+- **Follow-ups:** short refinements of the previous answer (see [Follow-up questions](#follow-up-questions)).
 
-It's good for exploring and for demos. It is keyword-based, so unusual phrasing and conversational follow-ups work best with Claude enabled.
+It's good for exploring and for demos. It is keyword-based, so unusual phrasing works best with Claude enabled.
 
 ---
 
@@ -294,15 +409,36 @@ It's good for exploring and for demos. It is keyword-based, so unusual phrasing 
 
 ---
 
+## Excel files
+
+DataChat reads **`.xlsx`** and **`.xlsm`** workbooks directly, with no Excel installation and no extra libraries (the file is unzipped and its XML parsed by the program itself). Macros are never run and external links are never followed.
+
+- **Sheets:** if the workbook has more than one visible sheet you are asked which to load, and the dataset is named `file.xlsx [Sheet]`. Hidden sheets are not offered. To analyse another sheet, load the file again and pick it.
+- **Header:** the first row of the data is the header. Title lines above the table are skipped (the chat tells you how many), blank rows and completely empty columns are dropped, and an unlabelled column is called `Column C` after its Excel letter.
+- **Dates:** cells with a date or time format become real dates (`2026-03-19`, or `2026-03-19 13:30:15` when there is a time). Both the 1900 and 1904 date systems work. A date cell holding `0` counts as empty.
+- **Numbers:** read at the precision Excel shows (15 significant digits), so floating-point noise such as `0.30000000000000004` doesn't appear. Cells formatted as percentages read as `25%`, which DataChat treats as the number 25, the same as a CSV with a `%` sign.
+- **Text, booleans and formulas:** text is kept as is, TRUE/FALSE become `TRUE` and `FALSE`, and formulas use the **value Excel last saved** for them. A file written by another program that never calculated its formulas will show them as empty.
+- **Merged cells:** only the top-left cell holds a value, so unmerge before loading if a merged cell labels several rows.
+- **Not supported:** old binary `.xls` files and password-protected workbooks (you get a message saying how to re-save as `.xlsx` or CSV), and sheets with more than 1,000,000 rows.
+
+The loaded data behaves exactly like a CSV from then on, so everything else in this guide applies.
+
+---
+
 ## Limitations
 
 - The data is held in memory, so very large files (millions of rows) will need a bigger heap (`java -Xmx4g ...`).
-- Only one table at a time. There are no joins across files.
+- Only one table at a time, and one Excel sheet at a time. There are no joins across files or sheets.
+- Excel: `.xls` and password-protected files aren't supported, formulas use their last saved values, and merged cells are read as a single value.
+- Outlier detection judges one column at a time with a fixed cut-off, and flags unusual values rather than proving errors. It needs at least 8 varied values (or 8 periods).
+- Copying a chart needs a desktop that supports image clipboards. Saving a PNG always works.
 - Day-first dates are assumed when a column is ambiguous (for example `03/04/2026` with no day above 12).
 - Number columns whose every value is ambiguous (only `1,234`-style or `1.200`-style values, in a file with no other evidence) are read as US numbers.
 - Stacked charts and multiple y-axes aren't supported. Multi-series data is drawn as grouped bars or multiple lines.
 - Driver analysis considers text columns (up to 40 distinct values each) and two-way combinations of columns with up to 12 values. Numeric columns aren't used as dimensions.
-- The offline engine can't resolve follow-ups that depend on the previous question.
+- Offline follow-ups handle the common refinements (split, filter, change aggregation, chart type, top N, colour by); more open-ended follow-ups such as *"why is that?"* work best with Claude.
+- Correlation is linear (Pearson), with Spearman as a cross-check. It needs at least two numeric columns and doesn't test significance beyond a rule-of-thumb noise warning.
+- Drill-down on a chart starts a new analysis based on what you clicked. It doesn't remember which earlier questions led there beyond the filters it carries.
 - The PDF report uses built-in fonts and only covers Western European characters.
 - A language model can occasionally misread a question. Check the **How it was computed** tab if an answer surprises you.
 
@@ -321,6 +457,11 @@ It's good for exploring and for demos. It is keyword-based, so unusual phrasing 
 | Out of memory | Launch with a larger heap: `java -Xmx4g DataChat.java` |
 | Numbers read 1000x too small or large | A `1.200` or `1,234` column was read in the wrong style. See *European number formats* under [CSV handling](#csv-handling) |
 | No auto-insights appear | Nothing in the data crossed the thresholds (for example fewer than 3 time periods), or the file has no date or numeric columns. Ask questions as usual |
+| `... is an old-style Excel (.xls) file` | Open it in Excel, **Save As** `.xlsx` (or CSV), and load that |
+| Excel dates show as numbers | The column probably has no date format in the workbook. Apply a date format in Excel and save, or convert the column to text dates |
+| Formulas load as empty cells | The workbook was never calculated and saved by Excel. Open it in Excel, save it, and load it again |
+| Outlier check says a column was *not tested* | Most of its values are identical, or there are fewer than 8 of them, so there is no spread to measure |
+| **Save chart as PNG...** and **Copy chart** are greyed out | The current answer has no chart (for example a table of rows). Ask a question that produces a chart |
 | `?` characters in the PDF | The text contains characters outside Western European encodings, which the built-in PDF fonts can't show |
 
 ---
@@ -333,13 +474,17 @@ Everything lives in `DataChat.java`, organised as nested classes:
 |---|---|
 | `DataChat` | Swing UI: toolbar, chat transcript, tabs, drag and drop, background `SwingWorker` tasks |
 | `DataTable`, `Column` | In-memory table, CSV parsing, type detection (`NUMBER` / `DATE` / `TEXT`), schema description for the model |
+| `Xlsx` | Dependency-free Excel reader: unzips the workbook, streams the XML, resolves shared strings, date and percent styles, and tidies the grid into rows for `DataTable` |
 | `Plan`, `Filter` | The analysis plan, with JSON conversion |
-| `Engine` | Executes a plan: filtering, grouping, aggregation, driver analysis, fact generation |
+| `Engine` | Executes a plan: filtering, grouping, aggregation, driver analysis, correlation, anomaly detection (`anomalies`, `periodAnomalies`, `robustScores`), fact generation |
 | `Result`, `ChartData` | Output of the engine: table rows, chart specs, plain-English facts |
-| `LocalPlanner` | Offline natural-language to plan translation, and offline answer text |
+| `LocalPlanner` | Offline natural-language to plan translation (including follow-ups that modify the previous plan, and correlation detection), and offline answer text |
+| `Drill` | Turns a click on a chart element into a follow-up `Plan` |
 | `Claude` | Anthropic Messages API client plus the planner and explainer system prompts |
 | `Json` | Minimal JSON reader and writer (no libraries) |
-| `ChartPanel` | Java2D chart rendering: bar, horizontal bar, line, pie, with tooltips. Also used to render charts into the PDF |
+| `DarkTheme` | The dark colour theme (a small Metal theme); `DataChat.setDark` switches look and feel, recolours the chat transcript and redraws the charts |
+| `ChartExport` | Save a chart as PNG (rendered at 2x) or copy it to the clipboard; used by the toolbar button and the chart's right-click menu |
+| `ChartPanel` | Java2D chart rendering: bar, horizontal bar, line, pie, scatter, with tooltips and click handling. Also used to render charts into the PDF |
 | `Insights`, `Insight` | The on-load scan: biggest drop and rise, over-indexing segments, outliers, trend and missing data. Each insight carries a ready-made `Plan` |
 | `Pdf`, `ReportBuilder` | Minimal PDF 1.4 writer (text, rules, JPEG images, Flate-compressed pages) and the report layout |
 | `DemoData` | Synthetic transactions generator and example questions |
@@ -349,6 +494,11 @@ Everything lives in `DataChat.java`, organised as nested classes:
 - **New aggregation:** add it to `Acc.get`, `Engine.aggOf` and `measureLabel`, and mention it in `Claude.PLAN_SYSTEM`.
 - **New time bucket:** add a case in `Engine.bucketLabel` and the allowed set in `Engine.bucketOf`.
 - **New chart type:** add a `ChartType`, a paint method in `ChartPanel`, and a rule in `Engine.chartType`.
+- **New follow-up phrase:** add the cue to `LocalPlanner.STRONG` (or `WEAK` for very short questions) and handle what it changes in `LocalPlanner.followUp`.
+- **New drill-down behaviour:** edit `Drill.plan`. Charts carry what a click means in `ChartData` (`basePlan`, `labelFilters`, `seriesFilters`, `periodX`).
+- **Dark palette:** edit the colours in `DarkTheme` (whole UI), `ChartPanel.setDark` (charts) and `DataChat.renderChat` (chat text colours).
+- **Anomaly sensitivity:** change `Engine.ANOMALY_Z` (default 3.5; lower flags more) or `Engine.MIN_GROUP` / `MIN_PERIODS`.
+- **Another file format:** produce a `List<String[]>` (header first) and pass it to `DataTable.fromRecords`, as `Xlsx` does, then add the extension to `loadFile` and the file chooser filter.
 - **New insight:** add a method to `Insights` that builds an `Insight(headline, plan)` and call it from `Insights.generate`. The plan runs through the normal engine when the user clicks *explore*.
 - **Report layout:** edit `ReportBuilder.build`; the `Pdf` helper offers `para`, `table`, `image`, `rule` and automatic page breaks.
 - **Different model:** change the **Model** field or set `ANTHROPIC_MODEL`.
