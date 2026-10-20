@@ -92,6 +92,8 @@ public class DataChat extends JFrame {
     private final JTextArea planArea = new JTextArea();
     private final JPanel examples = new JPanel(new GridLayout(0, 1, 0, 3));
     private final JTabbedPane tabs = new JTabbedPane();
+    private final JButton saveCsvBtn = new JButton("Save result as CSV...");
+    private Result lastResult;
 
     public DataChat() {
         super("DataChat - ask your CSV anything");
@@ -156,7 +158,14 @@ public class DataChat extends JFrame {
         dataTable.setAutoResizeMode(JTable.AUTO_RESIZE_OFF);
         dataTable.setFillsViewportHeight(true);
         tabs.addTab("Chart", chartTab);
-        tabs.addTab("Result table", new JScrollPane(resultTable));
+        saveCsvBtn.setEnabled(false);
+        saveCsvBtn.addActionListener(e -> saveCsv());
+        JPanel resultBar = new JPanel(new FlowLayout(FlowLayout.RIGHT, 6, 2));
+        resultBar.add(saveCsvBtn);
+        JPanel resultTab = new JPanel(new BorderLayout());
+        resultTab.add(resultBar, BorderLayout.NORTH);
+        resultTab.add(new JScrollPane(resultTable), BorderLayout.CENTER);
+        tabs.addTab("Result table", resultTab);
         tabs.addTab("Your data", new JScrollPane(dataTable));
         tabs.addTab("How it was computed", new JScrollPane(planArea));
         JPanel right = new JPanel(new BorderLayout());
@@ -281,6 +290,8 @@ public class DataChat extends JFrame {
         demoLoaded = demo;
         turns.clear();
         chatHtml.setLength(0);
+        lastResult = null;
+        saveCsvBtn.setEnabled(false);
         dataTable.setModel(new AbstractTableModel() {
             public int getRowCount() { return t.rows; }
             public int getColumnCount() { return t.cols.size(); }
@@ -405,6 +416,8 @@ public class DataChat extends JFrame {
     }
 
     private void showResult(Plan plan, Result r) {
+        lastResult = r;
+        saveCsvBtn.setEnabled(true);
         DefaultTableModel m = new DefaultTableModel(r.headers.toArray(), 0) {
             public boolean isCellEditable(int row, int col) { return false; }
         };
@@ -430,6 +443,29 @@ public class DataChat extends JFrame {
         }
         chartHost.revalidate();
         chartHost.repaint();
+    }
+
+    private void saveCsv() {
+        if (lastResult == null) return;
+        String base = lastResult.title == null || lastResult.title.isBlank() ? "result" : lastResult.title;
+        base = base.replaceAll("[^A-Za-z0-9._ -]+", "").trim().replaceAll("\\s+", "_");
+        if (base.isEmpty()) base = "result";
+        if (base.length() > 60) base = base.substring(0, 60);
+        JFileChooser fc = new JFileChooser(lastDir);
+        fc.setFileFilter(new FileNameExtensionFilter("CSV file", "csv"));
+        fc.setSelectedFile(new File(base + ".csv"));
+        if (fc.showSaveDialog(this) != JFileChooser.APPROVE_OPTION) return;
+        File f = fc.getSelectedFile();
+        if (!f.getName().toLowerCase().endsWith(".csv")) f = new File(f.getPath() + ".csv");
+        if (f.exists() && JOptionPane.showConfirmDialog(this, f.getName() + " already exists. Overwrite it?", "Save result",
+                JOptionPane.YES_NO_OPTION) != JOptionPane.YES_OPTION) return;
+        try {
+            Files.writeString(f.toPath(), "\uFEFF" + lastResult.toCsv(), StandardCharsets.UTF_8);   // BOM so Excel reads UTF-8
+            lastDir = f.getParentFile();
+            say("Analyst", "Saved the result table (" + lastResult.rows.size() + " rows) to <b>" + esc(f.getName()) + "</b>.", GREEN);
+        } catch (IOException ex) {
+            JOptionPane.showMessageDialog(this, "Could not save: " + ex.getMessage());
+        }
     }
 
     private void saveChart() {
@@ -878,6 +914,27 @@ public class DataChat extends JFrame {
         List<ChartData> charts = new ArrayList<>();
         List<String> facts = new ArrayList<>();
         int matched, total;
+        boolean rawCells;   // true when cells are original text (row listings); false when they are formatted numbers
+
+        /** RFC 4180 CSV. Formatted numbers like "+12,503.58" are turned back into plain numbers for spreadsheets. */
+        String toCsv() {
+            StringBuilder sb = new StringBuilder();
+            appendCsvRow(sb, headers.toArray(new String[0]), false);
+            for (String[] row : rows) appendCsvRow(sb, row, !rawCells);
+            return sb.toString();
+        }
+
+        private static void appendCsvRow(StringBuilder sb, String[] cells, boolean unformat) {
+            for (int i = 0; i < cells.length; i++) {
+                String c = cells[i] == null ? "" : cells[i];
+                if (unformat && c.matches("[-+]?\\d{1,3}(,\\d{3})*(\\.\\d+)?")) c = c.replace(",", "").replaceFirst("^\\+", "");
+                if (i > 0) sb.append(',');
+                if (c.contains(",") || c.contains("\"") || c.contains("\n") || c.contains("\r"))
+                    sb.append('"').append(c.replace("\"", "\"\"")).append('"');
+                else sb.append(c);
+            }
+            sb.append("\r\n");
+        }
 
         String toText(int maxRows) {
             StringBuilder sb = new StringBuilder(String.join("\t", headers)).append("\n");
@@ -1218,6 +1275,7 @@ public class DataChat extends JFrame {
                 idx.sort(asc ? cmp : cmp.reversed());
             }
             int lim = Math.min(p.limit != null ? p.limit : 20, 200);
+            r.rawCells = true;
             r.title = (p.title != null ? p.title : (asc ? "Lowest " : "Top ") + lim + " rows" + (sortCol != null ? " by " + sortCol.name : ""));
             for (Column c : t.cols) r.headers.add(c.name);
             for (int k = 0; k < Math.min(lim, idx.size()); k++) {

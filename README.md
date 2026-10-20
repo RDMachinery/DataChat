@@ -1,5 +1,3 @@
-![Screenshot](screenshot.jpeg)
-
 # DataChat
 
 **Ask your CSV questions in plain English and get an answer plus a chart.**
@@ -70,7 +68,7 @@ The key is held in memory only and is never written to disk. Without a key (or w
 | **Toolbar** | Load CSV, Demo data, API key, model name, Offline mode, and the sample-rows privacy toggle |
 | **Chat (left)** | Your questions and the analyst's plain-English answers, plus clickable example questions |
 | **Chart tab** | The chart(s) for the latest answer. Hover for exact values. **Save chart as PNG...** exports it |
-| **Result table tab** | The exact numbers behind the answer |
+| **Result table tab** | The exact numbers behind the answer. **Save result as CSV...** exports them (see [Exporting results](#exporting-results)) |
 | **Your data tab** | A scrollable view of the loaded CSV |
 | **How it was computed tab** | The JSON plan that was executed, how many rows were used, and the computed facts |
 
@@ -86,6 +84,15 @@ The status bar shows the loaded file, row and column counts, and which engine is
 The demo is 2,317 synthetic financial transactions from January to June 2026 with these columns: `TransactionID, Date, Region, Category, Channel, Status, Amount`.
 
 It contains a deliberate story: **March dips** because the North region (store closures) and the Hardware category (supply shortage) sell much less. Ask *"What's driving the drop in March?"* and the analysis should surface exactly those two.
+
+### Exporting results
+
+Open the **Result table** tab and click **Save result as CSV...** to save the table behind the latest answer. The button is greyed out until you've asked a question.
+
+- The suggested file name comes from the answer's title.
+- Numbers are written as plain values (`12503.58`, not `+12,503.58`) so they open cleanly in Excel, Numbers or Google Sheets. Percentage columns such as `-59.4%` stay as text.
+- The file is UTF-8 with a byte-order mark, which Excel needs to display non-ASCII characters correctly, and fields containing commas, quotes or line breaks are quoted.
+- The chart isn't part of the CSV. Use **Save chart as PNG...** for that.
 
 ### Asking questions
 
